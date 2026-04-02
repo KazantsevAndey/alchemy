@@ -1,0 +1,25 @@
+# Секреты
+config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Кэш данных
+cache/
+
+# Excel-файлы (генерируются / содержат данные)
+*.xlsx
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Временные файлы Excel
+~$*
+
+# OS
+.DS_Store
+
+# Промо-данные
+promo_data/
