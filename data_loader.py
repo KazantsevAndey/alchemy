@@ -127,8 +127,11 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
 
     # Прайс
     if price_path is None:
-        from config import PRICE_FILE
-        price_path = PRICE_FILE
+        try:
+            from config import PRICE_FILE
+            price_path = PRICE_FILE
+        except ImportError:
+            price_path = None
 
     print("Загрузка прайса...")
     price = load_price(price_path)
