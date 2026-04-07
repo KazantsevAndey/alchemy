@@ -1,118 +1,177 @@
-"""Settings page: Price list upload with strict validation."""
+"""Settings page: Product catalog & cost prices."""
 
 import streamlit as st
 import pandas as pd
 import io
-from pathlib import Path
-from datetime import datetime
 
-from db import get_active_price, save_price_list
-from user_context import get_user_data_dir
-
-
-# ── Required columns ─────────────────────────────────────────────────────
-
-REQUIRED_COLS = ["Артикул", "Цена в рублях"]
-
-# Optional but recognized columns (will be kept if present)
-OPTIONAL_COLS = ["Наименование", "Ozon SKU ID"]
-
-# Fuzzy column name mapping: user might name them differently
-_COL_ALIASES = {
-    "Артикул": ["артикул", "article", "sku", "артикул поставщика", "offer_id",
-                 "артикул продавца", "vendor code", "vendorcode", "код товара"],
-    "Цена в рублях": ["цена в рублях", "себестоимость", "цена", "cost", "price",
-                        "себес", "закупочная цена", "закупка", "cost_price",
-                        "цена закупки"],
-    "Наименование": ["наименование", "название", "name", "товар", "product",
-                      "название товара"],
-    "Ozon SKU ID": ["ozon sku id", "ozon sku", "sku id", "ozon_sku_id",
-                      "sku ozon"],
-}
+from db import (
+    get_catalog, get_catalog_count, upsert_catalog_items,
+    update_cost_prices, get_cost_map,
+)
+from user_context import get_user_credentials, has_marketplace_credentials
 
 
-def _match_columns(df: pd.DataFrame) -> tuple[dict, list]:
-    """Try to map DataFrame columns to expected names.
-
-    Returns:
-        (rename_map, missing_required)
-    """
-    rename_map = {}
-    found = set()
-
-    for target, aliases in _COL_ALIASES.items():
-        # Exact match first
-        if target in df.columns:
-            found.add(target)
-            continue
-
-        # Fuzzy match
-        for col in df.columns:
-            col_lower = str(col).lower().strip()
-            if col_lower in aliases:
-                rename_map[col] = target
-                found.add(target)
-                break
-
-    missing = [c for c in REQUIRED_COLS if c not in found]
-    return rename_map, missing
-
-
-def _generate_template() -> bytes:
-    """Generate downloadable Excel template."""
-    df = pd.DataFrame({
-        "Артикул": ["8000604001306", "4640165782296", "8003012015071"],
-        "Наименование": ["Кофе Illy зерно 250г", "Чай Ahmad Earl Grey", "Lavazza Qualita Oro"],
-        "Цена в рублях": [450.0, 320.0, 890.0],
-        "Ozon SKU ID": [123456789, 987654321, 555666777],
+def _export_excel(catalog: list[dict]) -> bytes:
+    """Export catalog to Excel for offline editing."""
+    df = pd.DataFrame(catalog)
+    cols = ["article", "name", "cost_price"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[cols].rename(columns={
+        "article": "Артикул",
+        "name": "Наименование",
+        "cost_price": "Себестоимость",
     })
     buf = io.BytesIO()
-    df.to_excel(buf, index=False, sheet_name="Себестоимость")
+    df.to_excel(buf, index=False, sheet_name="Каталог")
     return buf.getvalue()
 
 
 def render(user_id: int):
-    st.title("Прайс-лист")
+    st.title("Себестоимость")
 
-    # Current price info
-    active = get_active_price(user_id)
-    if active:
-        st.info(
-            f"Текущий прайс: **{active['filename']}** "
-            f"({active['sku_count']} SKU, загружен {active['uploaded_at'][:16]})"
-        )
+    tab1, tab2 = st.tabs(["Каталог товаров", "Загрузить файл"])
+
+    with tab1:
+        _render_catalog(user_id)
+
+    with tab2:
+        _render_upload(user_id)
+
+
+def _render_catalog(user_id: int):
+    """Main tab: fetch catalog from APIs, edit cost prices inline."""
+
+    creds = get_user_credentials(user_id)
+    has_any_mp = (
+        has_marketplace_credentials(user_id, "ozon") or
+        has_marketplace_credentials(user_id, "wb") or
+        has_marketplace_credentials(user_id, "ym")
+    )
+
+    catalog_count = get_catalog_count(user_id)
+
+    # ── Status ──────────────────────────────────────────────────────
+    if catalog_count > 0:
+        cost_map = get_cost_map(user_id)
+        filled = len(cost_map)
+        st.info(f"В каталоге **{catalog_count}** товаров, себестоимость указана у **{filled}**")
     else:
-        st.warning("Прайс-лист не загружен. Себестоимость не будет учитываться.")
+        st.warning("Каталог пуст. Подключите API-ключи и нажмите «Сформировать каталог».")
 
-    st.divider()
+    # ── Fetch button ────────────────────────────────────────────────
+    if not has_any_mp:
+        st.caption("Добавьте API-ключи на странице «API-ключи», чтобы загрузить каталог.")
+    else:
+        if st.button("Сформировать каталог", type="primary"):
+            _fetch_catalog(user_id, creds)
+            st.rerun()
 
-    # Template download
-    st.subheader("Формат файла")
+    if catalog_count == 0:
+        return
+
+    # ── Editable table ──────────────────────────────────────────────
+    st.subheader("Редактирование цен")
+
+    catalog = get_catalog(user_id)
+    df = pd.DataFrame(catalog)
+
+    # Prepare display DataFrame
+    display_df = pd.DataFrame({
+        "Артикул": df["article"],
+        "Наименование": df["name"],
+        "Себестоимость": df["cost_price"].astype(float),
+        "Ozon": df["ozon_sku"].apply(lambda x: True if x else False),
+        "WB": df["wb_nm_id"].apply(lambda x: True if x else False),
+        "YM": df["ym_market_sku"].apply(lambda x: True if x else False),
+    })
+
+    edited = st.data_editor(
+        display_df,
+        column_config={
+            "Артикул": st.column_config.TextColumn(disabled=True),
+            "Наименование": st.column_config.TextColumn(disabled=True),
+            "Себестоимость": st.column_config.NumberColumn(
+                min_value=0, max_value=999999, step=0.01, format="%.2f"
+            ),
+            "Ozon": st.column_config.CheckboxColumn(disabled=True),
+            "WB": st.column_config.CheckboxColumn(disabled=True),
+            "YM": st.column_config.CheckboxColumn(disabled=True),
+        },
+        use_container_width=True,
+        num_rows="fixed",
+        key="price_editor",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Сохранить цены", type="primary"):
+            updates = {}
+            for i, row in edited.iterrows():
+                art = row["Артикул"]
+                cost = float(row["Себестоимость"]) if pd.notna(row["Себестоимость"]) else 0.0
+                orig = float(display_df.loc[i, "Себестоимость"])
+                if cost != orig:
+                    updates[art] = cost
+            if updates:
+                update_cost_prices(user_id, updates)
+                st.success(f"Обновлено {len(updates)} цен")
+                st.rerun()
+            else:
+                st.info("Нет изменений")
+
+    with col2:
+        st.download_button(
+            "Скачать Excel",
+            data=_export_excel(catalog),
+            file_name="catalog_prices.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def _fetch_catalog(user_id: int, creds: dict):
+    """Fetch product catalogs from all connected marketplaces."""
+    from catalog_fetcher import fetch_ozon_catalog, fetch_wb_catalog, fetch_ym_catalog, merge_catalogs
+
+    ozon_items, wb_items, ym_items = [], [], []
+
+    with st.status("Загрузка каталога...", expanded=True) as status:
+        if creds.get("OZON_SELLER_CLIENT_ID"):
+            st.write("Ozon: загрузка товаров...")
+            ozon_items = fetch_ozon_catalog(creds)
+            st.write(f"Ozon: {len(ozon_items)} товаров")
+
+        if creds.get("WB_API_KEY"):
+            st.write("WB: загрузка товаров...")
+            wb_items = fetch_wb_catalog(creds)
+            st.write(f"WB: {len(wb_items)} товаров")
+
+        if creds.get("YM_API_KEY"):
+            st.write("YM: загрузка товаров...")
+            ym_items = fetch_ym_catalog(creds)
+            st.write(f"YM: {len(ym_items)} товаров")
+
+        merged = merge_catalogs(ozon_items, wb_items, ym_items)
+        st.write(f"Итого уникальных артикулов: {len(merged)}")
+
+        if merged:
+            upsert_catalog_items(user_id, merged)
+            status.update(label=f"Каталог обновлён: {len(merged)} товаров", state="complete")
+        else:
+            status.update(label="Товары не найдены", state="error")
+
+
+def _render_upload(user_id: int):
+    """Upload tab: import cost prices from Excel."""
+
     st.markdown("""
-**Обязательные колонки:**
-- **Артикул** — артикул товара (совпадает с артикулом на маркетплейсах)
-- **Цена в рублях** — себестоимость за 1 шт.
-
-**Необязательные колонки:**
-- **Наименование** — название товара
-- **Ozon SKU ID** — числовой SKU из Ozon (для точного матча)
+Загрузите Excel-файл с себестоимостью. Обязательные колонки:
+- **Артикул** — артикул товара
+- **Себестоимость** (или «Цена в рублях») — цена за 1 шт.
 """)
 
-    st.download_button(
-        "Скачать шаблон",
-        data=_generate_template(),
-        file_name="price_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    st.divider()
-
-    # Upload
-    uploaded = st.file_uploader(
-        "Загрузите Excel с себестоимостью",
-        type=["xlsx", "xls"],
-    )
-
+    uploaded = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
     if not uploaded:
         return
 
@@ -126,122 +185,54 @@ def render(user_id: int):
         st.error("Файл пустой")
         return
 
-    # ── Column matching ──────────────────────────────────────────────
-    rename_map, missing = _match_columns(df)
+    # Find article column
+    art_col = None
+    for col in df.columns:
+        if str(col).lower().strip() in ["артикул", "article", "offer_id", "vendorcode", "sku",
+                                         "артикул поставщика", "артикул продавца"]:
+            art_col = col
+            break
+    if art_col is None and "Артикул" in df.columns:
+        art_col = "Артикул"
 
-    if rename_map:
-        st.info("Автоматически распознаны колонки: " +
-                ", ".join(f"«{k}» → **{v}**" for k, v in rename_map.items()))
-        df = df.rename(columns=rename_map)
+    # Find price column
+    price_col = None
+    for col in df.columns:
+        if str(col).lower().strip() in ["себестоимость", "цена в рублях", "цена", "cost",
+                                         "price", "cost_price", "закупочная цена", "закупка"]:
+            price_col = col
+            break
 
-    if missing:
-        st.error(f"Не найдены обязательные колонки: **{', '.join(missing)}**")
+    if art_col is None or price_col is None:
+        st.error(f"Не найдены колонки «Артикул» и/или «Себестоимость»")
         st.caption(f"Колонки в файле: {', '.join(df.columns.tolist())}")
-        st.markdown("Скачайте шаблон выше и заполните по образцу.")
         return
 
-    # ── Data validation ──────────────────────────────────────────────
-    errors = []
-    warnings = []
+    df[art_col] = df[art_col].astype(str).str.strip()
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
 
-    # Clean article
-    df["Артикул"] = df["Артикул"].astype(str).str.strip()
-    df = df[df["Артикул"].notna() & (df["Артикул"] != "") & (df["Артикул"] != "nan")]
+    valid = df[df[art_col].notna() & (df[art_col] != "") & (df[art_col] != "nan")
+               & df[price_col].notna() & (df[price_col] > 0)].copy()
+    valid = valid.drop_duplicates(subset=art_col, keep="last")
 
-    if len(df) == 0:
-        st.error("Нет строк с заполненным артикулом")
+    if valid.empty:
+        st.error("Нет строк с корректным артикулом и ценой")
         return
 
-    # Clean price
-    df["Цена в рублях"] = pd.to_numeric(df["Цена в рублях"], errors="coerce")
+    st.success(f"Найдено **{len(valid)}** товаров с ценами")
 
-    no_price = df["Цена в рублях"].isna().sum()
-    if no_price > 0:
-        warnings.append(f"{no_price} строк без цены (будут пропущены)")
+    # Preview
+    st.dataframe(valid[[art_col, price_col]].head(15), use_container_width=True)
 
-    negative = (df["Цена в рублях"] < 0).sum()
-    if negative > 0:
-        errors.append(f"{negative} строк с отрицательной ценой")
+    if st.button("Загрузить цены", type="primary"):
+        # Upsert articles that might not be in catalog yet
+        items = [{"article": row[art_col], "name": ""} for _, row in valid.iterrows()]
+        upsert_catalog_items(user_id, items)
 
-    zero_price = (df["Цена в рублях"] == 0).sum()
-    if zero_price > 0:
-        warnings.append(f"{zero_price} строк с нулевой ценой")
+        # Update cost prices
+        updates = {str(row[art_col]).strip(): float(row[price_col])
+                   for _, row in valid.iterrows()}
+        update_cost_prices(user_id, updates)
 
-    # Duplicates
-    dupes = df[df["Артикул"].duplicated(keep=False)]
-    if len(dupes) > 0:
-        n_dupes = df["Артикул"].duplicated().sum()
-        warnings.append(f"{n_dupes} дубликатов артикулов (будет взята последняя строка)")
-
-    # Suspicious prices
-    valid_prices = df["Цена в рублях"].dropna()
-    if len(valid_prices) > 0:
-        if valid_prices.max() > 100_000:
-            warnings.append(f"Есть цены > 100 000 ₽ (макс: {valid_prices.max():,.0f})")
-        if valid_prices.min() < 1 and valid_prices.min() > 0:
-            warnings.append(f"Есть цены < 1 ₽ (мин: {valid_prices.min():.2f})")
-
-    if errors:
-        for e in errors:
-            st.error(e)
-        st.markdown("Исправьте ошибки и загрузите файл заново.")
-        return
-
-    for w in warnings:
-        st.warning(w)
-
-    # ── Valid rows ────────────────────────────────────────────────────
-    valid = df[df["Цена в рублях"].notna() & (df["Цена в рублях"] > 0)].copy()
-
-    # Deduplicate (keep last)
-    valid = valid.drop_duplicates(subset="Артикул", keep="last")
-    sku_count = len(valid)
-
-    if sku_count == 0:
-        st.error("Нет строк с корректной ценой")
-        return
-
-    st.success(f"**{sku_count}** SKU с ценой (из {len(df)} строк в файле)")
-
-    # ── Preview ──────────────────────────────────────────────────────
-    st.subheader("Превью")
-    preview_cols = [c for c in ["Артикул", "Наименование", "Цена в рублях", "Ozon SKU ID"]
-                    if c in valid.columns]
-    st.dataframe(
-        valid[preview_cols].head(15).style.format({"Цена в рублях": "{:,.2f}"}),
-        use_container_width=True,
-    )
-
-    # Price stats
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("SKU", sku_count)
-    with c2:
-        st.metric("Средняя цена", f"{valid['Цена в рублях'].mean():,.0f} ₽")
-    with c3:
-        st.metric("Медиана", f"{valid['Цена в рублях'].median():,.0f} ₽")
-
-    # ── Apply ────────────────────────────────────────────────────────
-    if st.button("Применить прайс", type="primary"):
-        data_dir = get_user_data_dir(user_id)
-
-        # Save current
-        current_path = data_dir / "price_current.xlsx"
-        uploaded.seek(0)
-        current_path.write_bytes(uploaded.read())
-
-        # Save backup
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M")
-        uploaded.seek(0)
-        (data_dir / f"price_{ts}.xlsx").write_bytes(uploaded.read())
-
-        # Record in DB
-        save_price_list(
-            user_id=user_id,
-            filename=uploaded.name,
-            file_path=str(current_path),
-            sku_count=sku_count,
-        )
-
-        st.success(f"Прайс применён: {uploaded.name} ({sku_count} SKU)")
+        st.success(f"Загружено {len(updates)} цен")
         st.rerun()

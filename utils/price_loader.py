@@ -14,6 +14,12 @@ def load_price(file_path: str) -> pd.DataFrame:
     return price
 
 
+def build_cost_map_from_db(user_id: int) -> dict:
+    """Build cost map from DB catalog. Returns {article: cost_price}."""
+    from db import get_cost_map
+    return get_cost_map(user_id)
+
+
 def build_cost_map(price: pd.DataFrame, key_col: str = "Артикул") -> dict:
     """Строит словарь {sku: себестоимость} из прайса."""
     cost_map = {}
