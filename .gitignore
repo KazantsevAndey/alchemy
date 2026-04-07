@@ -1,5 +1,13 @@
 # Секреты
 config.py
+data/.fernet.key
+.env
+
+# Database
+data/alchemy.db
+
+# Per-user data
+data/user_*/
 
 # Python
 __pycache__/

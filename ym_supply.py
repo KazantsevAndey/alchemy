@@ -15,7 +15,6 @@ import time
 import io
 from datetime import datetime, timedelta
 
-from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID, PRICE_FILE
 from utils.price_loader import load_price
 
 # ── Настройки ────────────────────────────────────────────────────────────
@@ -23,12 +22,26 @@ from utils.price_loader import load_price
 DAYS_PLAN = 60
 QUANTUM_FILE = "quantum_stock.xlsx"
 
-YM_HEADERS = {
-    "Api-Key": YM_API_KEY,
-    "Content-Type": "application/json",
-}
-
 YM_BASE = "https://api.partner.market.yandex.ru"
+
+
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID
+    return {
+        "YM_API_KEY": YM_API_KEY,
+        "YM_CAMPAIGN_ID": YM_CAMPAIGN_ID,
+        "YM_BUSINESS_ID": YM_BUSINESS_ID,
+    }
+
+
+def _ym_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Api-Key": c["YM_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 # Маппинг кластеров из разных источников → единые имена Алхимии
 _CLUSTER_MAP = {
@@ -159,16 +172,18 @@ def _find_col(cols, cols_lower, keywords):
 
 # ── Отчёт оборачиваемости (API фоллбэк) ────────────────────────────────
 
-def load_turnover_report() -> pd.DataFrame:
+def load_turnover_report(creds=None) -> pd.DataFrame:
     """Скачать goods-turnover отчёт и вернуть DataFrame с daily/stock по SKU×кластер.
 
     Возвращает колонки: sku, cluster, name, daily, stock
     """
+    c = _get_creds(creds)
+    headers = _ym_headers(creds)
     print("  Генерация отчёта оборачиваемости ЯМ...")
     gen_resp = requests.post(
         f"{YM_BASE}/reports/goods-turnover/generate",
-        headers=YM_HEADERS,
-        json={"campaignId": YM_CAMPAIGN_ID},
+        headers=headers,
+        json={"campaignId": c["YM_CAMPAIGN_ID"]},
         timeout=30,
     )
 
@@ -190,7 +205,7 @@ def load_turnover_report() -> pd.DataFrame:
         try:
             st_resp = requests.get(
                 f"{YM_BASE}/reports/info/{report_id}",
-                headers=YM_HEADERS, timeout=30,
+                headers=headers, timeout=30,
             )
         except requests.exceptions.RequestException as e:
             print(f"  Ошибка проверки статуса: {e}")
@@ -216,7 +231,7 @@ def load_turnover_report() -> pd.DataFrame:
     # Скачиваем
     print("  Скачиваем отчёт...")
     try:
-        dl_resp = requests.get(file_url, headers={"Api-Key": YM_API_KEY}, timeout=60)
+        dl_resp = requests.get(file_url, headers={"Api-Key": c["YM_API_KEY"]}, timeout=60)
     except requests.exceptions.RequestException as e:
         print(f"  Ошибка скачивания: {e}")
         return pd.DataFrame(columns=["sku", "cluster", "name", "daily", "stock"])

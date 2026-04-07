@@ -13,25 +13,37 @@ import pandas as pd
 import requests
 import time
 
-from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
-
-HEADERS = {
-    "Client-Id": OZON_SELLER_CLIENT_ID,
-    "Api-Key": OZON_SELLER_API_KEY_V2,
-    "Content-Type": "application/json",
-}
-
 BASE = "https://api-seller.ozon.ru"
 
 
-def get_actions() -> pd.DataFrame:
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
+    return {
+        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+        "OZON_SELLER_API_KEY_V2": OZON_SELLER_API_KEY_V2,
+    }
+
+
+def _ozon_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Client-Id": c["OZON_SELLER_CLIENT_ID"],
+        "Api-Key": c.get("OZON_SELLER_API_KEY_V2", c.get("OZON_SELLER_API_KEY", "")),
+        "Content-Type": "application/json",
+    }
+
+
+def get_actions(creds=None) -> pd.DataFrame:
     """Список активных акций Ozon.
 
     Returns:
         DataFrame: id, title, date_start, date_end,
                    participating_products_count, potential_products_count и др.
     """
-    resp = requests.get(f"{BASE}/v1/actions", headers=HEADERS)
+    headers = _ozon_headers(creds)
+    resp = requests.get(f"{BASE}/v1/actions", headers=headers)
     if resp.status_code != 200:
         print(f"  Ошибка акций Ozon: {resp.status_code} — {resp.text[:200]}")
         return pd.DataFrame()
@@ -47,19 +59,20 @@ def get_actions() -> pd.DataFrame:
     return df
 
 
-def get_action_candidates(action_id: int, limit: int = 100) -> pd.DataFrame:
+def get_action_candidates(action_id: int, limit: int = 100, creds=None) -> pd.DataFrame:
     """Товары-кандидаты для участия в акции.
 
     Returns:
         DataFrame: id (product_id), price, action_price, max_action_price,
                    min_price, add_mode и др.
     """
+    headers = _ozon_headers(creds)
     all_items = []
     offset = 0
 
     while True:
         body = {"action_id": action_id, "limit": limit, "offset": offset}
-        resp = requests.post(f"{BASE}/v1/actions/candidates", headers=HEADERS, json=body)
+        resp = requests.post(f"{BASE}/v1/actions/candidates", headers=headers, json=body)
         if resp.status_code != 200:
             print(f"  Ошибка кандидатов акции {action_id}: {resp.status_code}")
             break
@@ -82,18 +95,19 @@ def get_action_candidates(action_id: int, limit: int = 100) -> pd.DataFrame:
     return df
 
 
-def get_action_products(action_id: int, limit: int = 100) -> pd.DataFrame:
+def get_action_products(action_id: int, limit: int = 100, creds=None) -> pd.DataFrame:
     """Товары, уже участвующие в акции.
 
     Returns:
         DataFrame: id (product_id), price, action_price, max_action_price и др.
     """
+    headers = _ozon_headers(creds)
     all_items = []
     offset = 0
 
     while True:
         body = {"action_id": action_id, "limit": limit, "offset": offset}
-        resp = requests.post(f"{BASE}/v1/actions/products", headers=HEADERS, json=body)
+        resp = requests.post(f"{BASE}/v1/actions/products", headers=headers, json=body)
         if resp.status_code != 200:
             print(f"  Ошибка товаров акции {action_id}: {resp.status_code}")
             break
@@ -116,18 +130,19 @@ def get_action_products(action_id: int, limit: int = 100) -> pd.DataFrame:
     return df
 
 
-def _fetch_offer_ids(product_ids: list[int]) -> dict[int, str]:
+def _fetch_offer_ids(product_ids: list[int], creds=None) -> dict[int, str]:
     """Получить offer_id по product_id через /v3/product/list.
 
     Returns:
         dict: {product_id: offer_id}
     """
+    headers = _ozon_headers(creds)
     result = {}
     for i in range(0, len(product_ids), 1000):
         batch = product_ids[i:i + 1000]
         resp = requests.post(
             f"{BASE}/v3/product/list",
-            headers=HEADERS,
+            headers=headers,
             json={"filter": {"product_id": batch}, "limit": 1000},
         )
         if resp.status_code != 200:
@@ -140,7 +155,7 @@ def _fetch_offer_ids(product_ids: list[int]) -> dict[int, str]:
     return result
 
 
-def build_promos_data() -> dict:
+def build_promos_data(creds=None) -> dict:
     """Собирает все данные по акциям Ozon для дашборда.
 
     Returns:
@@ -150,7 +165,7 @@ def build_promos_data() -> dict:
                        (объединение участников + кандидатов),
         }
     """
-    actions = get_actions()
+    actions = get_actions(creds)
     if actions.empty:
         return {"actions": pd.DataFrame(), "details": {}}
 
@@ -166,12 +181,12 @@ def build_promos_data() -> dict:
         print(f"\n  Акция #{aid}: {title} (участвуют: {participating}, кандидаты: {potential})")
 
         # Участвующие товары
-        in_action = get_action_products(aid)
+        in_action = get_action_products(aid, creds=creds)
         if not in_action.empty:
             in_action["in_action"] = True
 
         # Кандидаты
-        candidates = get_action_candidates(aid)
+        candidates = get_action_candidates(aid, creds=creds)
         if not candidates.empty:
             candidates["in_action"] = False
 
@@ -190,7 +205,7 @@ def build_promos_data() -> dict:
     # Получаем offer_id по product_id
     if all_product_ids:
         print(f"\n  Загрузка offer_id для {len(all_product_ids)} товаров...")
-        pid_to_offer = _fetch_offer_ids(list(all_product_ids))
+        pid_to_offer = _fetch_offer_ids(list(all_product_ids), creds)
         print(f"  Получено {len(pid_to_offer)} offer_id")
         for aid, df in details.items():
             if not df.empty and "id" in df.columns:

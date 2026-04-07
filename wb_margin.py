@@ -22,19 +22,22 @@ import requests
 import time
 from datetime import datetime, timedelta
 
-from config import WB_API_KEY, PRICE_FILE
 from utils.price_loader import load_price
 
 
-HEADERS = {
-    "Authorization": WB_API_KEY,
-    "Content-Type": "application/json",
-}
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import WB_API_KEY
+    return {"WB_API_KEY": WB_API_KEY}
 
-ADV_HEADERS = {
-    "Authorization": WB_API_KEY,
-    "Content-Type": "application/json",
-}
+
+def _wb_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Authorization": c["WB_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 NUMERIC_FIELDS = [
     "ppvz_for_pay", "delivery_rub", "storage_fee", "deduction",
@@ -45,11 +48,12 @@ NUMERIC_FIELDS = [
 
 # ── Реклама (ДРР) через Promotion API ───────────────────────────────────
 
-def _get_campaign_ids() -> list[int]:
+def _get_campaign_ids(creds=None) -> list[int]:
     """Получает ID всех рекламных кампаний."""
+    headers = _wb_headers(creds)
     resp = requests.get(
         "https://advert-api.wildberries.ru/adv/v1/promotion/count",
-        headers=ADV_HEADERS,
+        headers=headers,
     )
     if resp.status_code != 200:
         print(f"  Ошибка получения кампаний: {resp.status_code}")
@@ -67,11 +71,13 @@ def _get_campaign_ids() -> list[int]:
     return ids
 
 
-def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str) -> pd.DataFrame:
+def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
+                     creds=None) -> pd.DataFrame:
     """Загружает полную статистику по nm_id из /adv/v3/fullstats.
 
     Возвращает DataFrame с колонками [nm_id, adv_sum].
     """
+    headers = _wb_headers(creds)
     all_rows = []
     batch_size = 50
     total_batches = (len(campaign_ids) - 1) // batch_size + 1
@@ -83,7 +89,7 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str) -> p
 
         resp = requests.get(
             "https://advert-api.wildberries.ru/adv/v3/fullstats",
-            headers=ADV_HEADERS,
+            headers=headers,
             params={"ids": ids_str, "beginDate": date_from, "endDate": date_to},
         )
 
@@ -92,7 +98,7 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str) -> p
             time.sleep(20)
             resp = requests.get(
                 "https://advert-api.wildberries.ru/adv/v3/fullstats",
-                headers=ADV_HEADERS,
+                headers=headers,
                 params={"ids": ids_str, "beginDate": date_from, "endDate": date_to},
             )
 
@@ -126,18 +132,19 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str) -> p
     return result
 
 
-def get_wb_ads(date_from: str, date_to: str, period_name: str) -> pd.DataFrame:
+def get_wb_ads(date_from: str, date_to: str, period_name: str,
+               creds=None) -> pd.DataFrame:
     """Получает рекламные расходы по nm_id за период.
 
     date_to не должен быть сегодняшним днём (API не отдаёт данные за текущий день).
     """
     print(f"\nДРР {period_name}: {date_from} — {date_to}")
 
-    campaign_ids = _get_campaign_ids()
+    campaign_ids = _get_campaign_ids(creds)
     if not campaign_ids:
         return pd.DataFrame(columns=["nm_id", "adv_sum"])
 
-    result = _fetch_fullstats(campaign_ids, date_from, date_to)
+    result = _fetch_fullstats(campaign_ids, date_from, date_to, creds)
     total = result["adv_sum"].sum() if not result.empty else 0
     print(f"  Итого ДРР: {total:,.0f}, SKU с ДРР: {len(result)}")
     return result
@@ -145,8 +152,10 @@ def get_wb_ads(date_from: str, date_to: str, period_name: str) -> pd.DataFrame:
 
 # ── Загрузка отчёта ─────────────────────────────────────────────────────
 
-def load_report(date_from: str, date_to: str, period: str = "daily") -> pd.DataFrame:
+def load_report(date_from: str, date_to: str, period: str = "daily",
+                creds=None) -> pd.DataFrame:
     url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
+    headers = _wb_headers(creds)
     all_data: list = []
     rrdid = 0
     page = 1
@@ -159,12 +168,12 @@ def load_report(date_from: str, date_to: str, period: str = "daily") -> pd.DataF
             "rrdid": rrdid,
             "period": period,
         }
-        resp = requests.get(url, headers=HEADERS, params=params)
+        resp = requests.get(url, headers=headers, params=params)
 
         if resp.status_code == 429:
             print("  Rate limit, жду 65 сек...")
             time.sleep(65)
-            resp = requests.get(url, headers=HEADERS, params=params)
+            resp = requests.get(url, headers=headers, params=params)
 
         if resp.status_code == 204 or not resp.content:
             break
@@ -447,6 +456,7 @@ def main():
     print(f"Месяц: с {month_start.strftime('%d.%m.%Y')}")
 
     # Прайс
+    from config import PRICE_FILE
     price = load_price(PRICE_FILE)
 
     # Загрузка данных (один запрос за месяц, фильтруем вчера)

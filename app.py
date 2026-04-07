@@ -4,15 +4,27 @@ streamlit run app.py
 """
 
 import streamlit as st
+from db import init_db
+from auth import is_authenticated, login_page, logout
+
+init_db()
+
+if not is_authenticated():
+    login_page()
+    st.stop()
+
+# ── Authenticated — set up wide layout ─────────────────────────────────
+st.set_page_config(page_title="Alchemy", layout="wide",
+                   initial_sidebar_state="expanded")
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from data_loader import load as _dl_load, cache_age_minutes, cache_timestamp
-from config import PRICE_FILE
+from user_context import get_user_credentials, get_user_price_path
 
-st.set_page_config(page_title="Alchemy", layout="wide",
-                   initial_sidebar_state="expanded")
+_USER_ID = st.session_state["user_id"]
 
 # ── FastBoard BI global styles ────────────────────────────────────────────
 st.markdown("""
@@ -57,8 +69,12 @@ MSTR = f'{month_start.strftime("%d.%m")} — {yesterday.strftime("%d.%m.%Y")}'
 # ── cache loader ─────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
+def _C(key, user_id):
+    return _dl_load(key, user_id)
+
 def C(key):
-    return _dl_load(key)
+    """Load from per-user cache."""
+    return _C(key, _USER_ID)
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -350,10 +366,8 @@ _DEEPSEEK_SIGNAL_SYSTEM = """Ты — AI-аналитик платформы А�
 
 def _deepseek_call(system_prompt, user_prompt):
     """Call DeepSeek via OpenAI-compatible API, return answer or None."""
-    try:
-        from config import DEEPSEEK_API_KEY
-    except ImportError:
-        DEEPSEEK_API_KEY = ""
+    creds = get_user_credentials(_USER_ID)
+    DEEPSEEK_API_KEY = creds.get("DEEPSEEK_API_KEY", "")
     if not DEEPSEEK_API_KEY:
         return None
     import openai
@@ -371,7 +385,8 @@ def _deepseek_call(system_prompt, user_prompt):
 
 def _giga_call(system_prompt, user_prompt):
     """Call GigaChat, return answer or None."""
-    from config import GIGACHAT_CREDENTIALS
+    creds = get_user_credentials(_USER_ID)
+    GIGACHAT_CREDENTIALS = creds.get("GIGACHAT_CREDENTIALS", "")
     if not GIGACHAT_CREDENTIALS:
         return None
     from gigachat import GigaChat
@@ -632,6 +647,14 @@ if "nav" in qp:
 
 with st.sidebar:
     st.title("Alchemy ⚗️")
+
+    # User info
+    st.caption(st.session_state.get("user_name", ""))
+    if st.session_state.get("user_company"):
+        st.caption(st.session_state["user_company"])
+
+    st.divider()
+
     pages = [
         "⚗️ Сводка",
         "🔵 Ozon",
@@ -639,15 +662,19 @@ with st.sidebar:
         "🟡 Яндекс Маркет",
         "🚛 Поставки",
     ]
+    settings_pages = ["🔑 API-ключи", "📋 Прайс-лист"]
+    admin_pages = ["👥 Пользователи"] if st.session_state.get("is_admin") else []
+    all_pages = pages + settings_pages + admin_pages
+
     nav_idx = 0
-    if "nav" in st.session_state and st.session_state["nav"] in pages:
-        nav_idx = pages.index(st.session_state["nav"])
+    if "nav" in st.session_state and st.session_state["nav"] in all_pages:
+        nav_idx = all_pages.index(st.session_state["nav"])
         del st.session_state["nav"]
-    page = st.radio("Навигация", pages, index=nav_idx, label_visibility="collapsed")
+    page = st.radio("Навигация", all_pages, index=nav_idx, label_visibility="collapsed")
 
     st.divider()
-    age = cache_age_minutes()
-    ts = cache_timestamp()
+    age = cache_age_minutes(_USER_ID)
+    ts = cache_timestamp(_USER_ID)
     if age is not None:
         st.caption(f"Обновлено: {ts}")
     else:
@@ -657,15 +684,40 @@ with st.sidebar:
     if st.button(btn_label, use_container_width=True,
                  type="primary" if age is None or age >= 60 else "secondary"):
         from data_loader import refresh_all_data
+        creds = get_user_credentials(_USER_ID)
+        price_path = get_user_price_path(_USER_ID)
         with st.spinner("Загрузка данных с API..."):
-            refresh_all_data()
+            refresh_all_data(user_id=_USER_ID, creds=creds,
+                           price_path=str(price_path) if price_path else None)
         st.cache_data.clear()
         st.rerun()
 
+    st.divider()
+    if st.button("Выйти", use_container_width=True):
+        logout()
+        st.rerun()
+
+
+# ── Settings/Admin pages (no cache needed) ───────────────────────────────
+
+if page == "🔑 API-ключи":
+    from pages.settings_api import render as _render_api
+    _render_api(_USER_ID)
+    st.stop()
+
+if page == "📋 Прайс-лист":
+    from pages.settings_price import render as _render_price
+    _render_price(_USER_ID)
+    st.stop()
+
+if page == "👥 Пользователи":
+    from pages.admin_users import render as _render_admin
+    _render_admin()
+    st.stop()
 
 # ── gate ─────────────────────────────────────────────────────────────────
 
-if cache_age_minutes() is None:
+if cache_age_minutes(_USER_ID) is None:
     st.info("Нажмите «Загрузить данные» в боковой панели")
     st.stop()
 

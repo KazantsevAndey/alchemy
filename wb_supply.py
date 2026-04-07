@@ -19,7 +19,6 @@ import requests
 import time
 from datetime import datetime, timedelta
 
-from config import WB_API_KEY, PRICE_FILE
 from utils.price_loader import load_price
 
 # ── Настройки ────────────────────────────────────────────────────────────
@@ -28,10 +27,20 @@ DAYS_SALES = 30
 DAYS_PLAN = 60
 QUANTUM_FILE = "quantum_stock.xlsx"
 
-HEADERS = {
-    "Authorization": WB_API_KEY,
-    "Content-Type": "application/json",
-}
+
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import WB_API_KEY
+    return {"WB_API_KEY": WB_API_KEY}
+
+
+def _wb_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Authorization": c["WB_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 STATS_BASE = "https://statistics-api.wildberries.ru"
 
@@ -78,11 +87,12 @@ def load_quants(path: str = QUANTUM_FILE) -> pd.DataFrame:
 
 # ── Остатки ───────────────────────────────────────────────────────────────
 
-def get_wb_stocks() -> pd.DataFrame:
+def get_wb_stocks(creds=None) -> pd.DataFrame:
     """Остатки по складам WB (supplier/stocks)."""
+    headers = _wb_headers(creds)
     resp = requests.get(
         f"{STATS_BASE}/api/v1/supplier/stocks",
-        headers=HEADERS,
+        headers=headers,
         params={"dateFrom": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")},
     )
     if resp.status_code != 200:
@@ -102,11 +112,12 @@ def get_wb_stocks() -> pd.DataFrame:
 
 # ── Продажи по складам ───────────────────────────────────────────────────
 
-def get_wb_sales_by_warehouse(days: int = DAYS_SALES) -> pd.DataFrame:
+def get_wb_sales_by_warehouse(days: int = DAYS_SALES, creds=None) -> pd.DataFrame:
     """Продажи по складам за N дней из reportDetailByPeriod."""
     date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     date_to = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    headers = _wb_headers(creds)
     url = f"{STATS_BASE}/api/v5/supplier/reportDetailByPeriod"
     all_data = []
     rrdid = 0
@@ -119,12 +130,12 @@ def get_wb_sales_by_warehouse(days: int = DAYS_SALES) -> pd.DataFrame:
             "limit": 100000,
             "rrdid": rrdid,
         }
-        resp = requests.get(url, headers=HEADERS, params=params)
+        resp = requests.get(url, headers=headers, params=params)
 
         if resp.status_code == 429:
             print("  Rate limit, жду 65с...")
             time.sleep(65)
-            resp = requests.get(url, headers=HEADERS, params=params)
+            resp = requests.get(url, headers=headers, params=params)
 
         if resp.status_code == 204 or not resp.content:
             break

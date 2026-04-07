@@ -21,16 +21,29 @@ import requests
 import time
 import io
 
-from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID, PRICE_FILE
 from utils.price_loader import load_price, build_cost_map
 
 
-YM_HEADERS = {
-    "Api-Key": YM_API_KEY,
-    "Content-Type": "application/json",
-}
-
 YM_BASE = "https://api.partner.market.yandex.ru"
+
+
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID
+    return {
+        "YM_API_KEY": YM_API_KEY,
+        "YM_CAMPAIGN_ID": YM_CAMPAIGN_ID,
+        "YM_BUSINESS_ID": YM_BUSINESS_ID,
+    }
+
+
+def _ym_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Api-Key": c["YM_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 SVC_ORDER = [
     "Размещение", "Буст", "Доставка", "Хранение", "Перевод",
@@ -43,9 +56,10 @@ SVC_MAIN = ["Размещение", "Буст", "Доставка", "Хране�
 
 # ── Генерация отчётов ────────────────────────────────────────────────
 
-def _generate_report(endpoint: str, payload: dict) -> bytes | None:
+def _generate_report(endpoint: str, payload: dict, creds=None) -> bytes | None:
     url = f"{YM_BASE}/reports/{endpoint}/generate"
-    resp = requests.post(url, headers=YM_HEADERS, json=payload, timeout=30)
+    headers = _ym_headers(creds)
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
     if resp.status_code != 200:
         print(f"  Ошибка генерации {endpoint}: {resp.status_code} — {resp.text[:200]}")
         return None
@@ -55,7 +69,7 @@ def _generate_report(endpoint: str, payload: dict) -> bytes | None:
         time.sleep(3)
         r = requests.get(
             f"{YM_BASE}/reports/info/{report_id}",
-            headers=YM_HEADERS, timeout=30,
+            headers=headers, timeout=30,
         )
         if r.status_code != 200:
             continue
@@ -100,7 +114,7 @@ def _find_header_and_sku(df_raw, max_rows=15):
 
 # ── Парсинг отчёта по услугам ────────────────────────────────────────
 
-def load_services_report(date_from: str, date_to: str):
+def load_services_report(date_from: str, date_to: str, creds=None):
     """Загружает отчёт по услугам, парсит выручку (цена карточки) и затраты (гросс).
 
     Returns: (rev_df, costs_pivot, totals)
@@ -108,11 +122,12 @@ def load_services_report(date_from: str, date_to: str):
       costs_pivot: DataFrame [sku, Размещение, Буст, ...]
       totals:      dict {label: float}
     """
+    c = _get_creds(creds)
     content = _generate_report("united-marketplace-services", {
-        "businessId": YM_BUSINESS_ID,
+        "businessId": c["YM_BUSINESS_ID"],
         "dateTimeFrom": f"{date_from}T00:00:00+03:00",
         "dateTimeTo": f"{date_to}T23:59:59+03:00",
-    })
+    }, creds)
     if not content:
         empty_rev = pd.DataFrame(columns=["sku", "name", "qty", "revenue"])
         return empty_rev, pd.DataFrame(columns=["sku"]), {}
@@ -367,6 +382,7 @@ def main():
     print(f"Вчера: {yesterday.strftime('%d.%m.%Y')}")
     print(f"Месяц: с {month_start.strftime('%d.%m.%Y')}")
 
+    from config import PRICE_FILE
     cost_map = build_cost_map(load_price(PRICE_FILE))
 
     # Месяц

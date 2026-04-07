@@ -17,19 +17,30 @@ from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
-
 # ── Настройки ────────────────────────────────────────────────────────────
 
 DAYS_SALES = 30   # за сколько дней берём продажи
 DAYS_PLAN  = 60   # на сколько дней планируем запас
 QUANTUM_FILE = "quantum_stock.xlsx"
 
-HEADERS = {
-    "Client-Id": OZON_SELLER_CLIENT_ID,
-    "Api-Key": OZON_SELLER_API_KEY_V2,
-    "Content-Type": "application/json",
-}
+
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
+    return {
+        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+        "OZON_SELLER_API_KEY_V2": OZON_SELLER_API_KEY_V2,
+    }
+
+
+def _ozon_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Client-Id": c["OZON_SELLER_CLIENT_ID"],
+        "Api-Key": c.get("OZON_SELLER_API_KEY_V2", c.get("OZON_SELLER_API_KEY", "")),
+        "Content-Type": "application/json",
+    }
 
 # ── Маппинг складов → кластеры ───────────────────────────────────────────
 
@@ -73,13 +84,14 @@ CITY_TO_CLUSTER = {
 
 # ── API: загрузка остатков ───────────────────────────────────────────────
 
-def fetch_stocks() -> list:
+def fetch_stocks(creds=None) -> list:
+    headers = _ozon_headers(creds)
     all_stocks = []
     offset = 0
     while True:
         resp = requests.post(
             "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses",
-            headers=HEADERS, json={"limit": 1000, "offset": offset},
+            headers=headers, json={"limit": 1000, "offset": offset},
         )
         if resp.status_code != 200:
             print(f"  Ошибка остатков: {resp.status_code}")
@@ -97,7 +109,8 @@ def fetch_stocks() -> list:
 
 # ── API: загрузка продаж (FBO postings) ──────────────────────────────────
 
-def fetch_postings(days: int = DAYS_SALES) -> list:
+def fetch_postings(days: int = DAYS_SALES, creds=None) -> list:
+    headers = _ozon_headers(creds)
     date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00.000Z")
     date_to = datetime.now().strftime("%Y-%m-%dT23:59:59.000Z")
 
@@ -106,7 +119,7 @@ def fetch_postings(days: int = DAYS_SALES) -> list:
     while True:
         resp = requests.post(
             "https://api-seller.ozon.ru/v2/posting/fbo/list",
-            headers=HEADERS,
+            headers=headers,
             json={
                 "dir": "DESC",
                 "filter": {"since": date_from, "to": date_to},
@@ -187,6 +200,7 @@ def process_sales(raw_postings: list) -> pd.DataFrame:
 
 def get_stock_turnover(
     days_sales: int = DAYS_SALES,
+    creds=None,
 ) -> pd.DataFrame:
     """
     Возвращает DataFrame с оборачиваемостью по каждому SKU на каждом складе.
@@ -198,11 +212,11 @@ def get_stock_turnover(
     cluster — группировка для свёртки.
     """
     print("Загрузка остатков...")
-    raw_stocks = fetch_stocks()
+    raw_stocks = fetch_stocks(creds)
     df_stock = process_stocks(raw_stocks)
 
     print(f"Загрузка продаж за {days_sales} дней...")
-    raw_postings = fetch_postings(days_sales)
+    raw_postings = fetch_postings(days_sales, creds)
     df_sales = process_sales(raw_postings)
 
     # Остатки по складам

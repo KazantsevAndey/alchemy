@@ -20,14 +20,32 @@ import zipfile
 import io
 from datetime import datetime, timedelta, timezone
 
-from config import (
-    OZON_SELLER_CLIENT_ID,
-    OZON_SELLER_API_KEY,
-    OZON_PERF_CLIENT_ID,
-    OZON_PERF_CLIENT_SECRET,
-    PRICE_FILE,
-)
 from utils.price_loader import load_price
+
+
+def _get_creds(creds):
+    """Fallback to config.py if creds not provided."""
+    if creds:
+        return creds
+    from config import (
+        OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY,
+        OZON_PERF_CLIENT_ID, OZON_PERF_CLIENT_SECRET,
+    )
+    return {
+        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+        "OZON_SELLER_API_KEY": OZON_SELLER_API_KEY,
+        "OZON_PERF_CLIENT_ID": OZON_PERF_CLIENT_ID,
+        "OZON_PERF_CLIENT_SECRET": OZON_PERF_CLIENT_SECRET,
+    }
+
+
+def _seller_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Client-Id": c["OZON_SELLER_CLIENT_ID"],
+        "Api-Key": c["OZON_SELLER_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 
 # ── Даты ─────────────────────────────────────────────────────────────────
@@ -46,15 +64,11 @@ def _iso_z(dt: datetime, end_of_day: bool = False) -> str:
 
 # ── Seller API: транзакции ───────────────────────────────────────────────
 
-SELLER_HEADERS = {
-    "Client-Id": OZON_SELLER_CLIENT_ID,
-    "Api-Key": OZON_SELLER_API_KEY,
-    "Content-Type": "application/json",
-}
 
-
-def fetch_transactions(start_date: str, end_date: str, period_name: str) -> pd.DataFrame:
+def fetch_transactions(start_date: str, end_date: str, period_name: str,
+                       creds=None) -> pd.DataFrame:
     url = "https://api-seller.ozon.ru/v3/finance/transaction/list"
+    headers = _seller_headers(creds)
     payload = {
         "filter": {
             "date": {"from": start_date, "to": end_date},
@@ -68,7 +82,7 @@ def fetch_transactions(start_date: str, end_date: str, period_name: str) -> pd.D
 
     all_transactions = []
     while True:
-        resp = requests.post(url, headers=SELLER_HEADERS, json=payload)
+        resp = requests.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
             print(f"  Ошибка {resp.status_code} ({period_name})")
             break
@@ -161,13 +175,14 @@ def build_nachislen(transactions_df: pd.DataFrame, period_name: str) -> pd.DataF
 
 # ── Performance API: ДРР ─────────────────────────────────────────────────
 
-def _get_perf_token() -> str | None:
+def _get_perf_token(creds=None) -> str | None:
+    c = _get_creds(creds)
     resp = requests.post(
         "https://api-performance.ozon.ru/api/client/token",
         headers={"Content-Type": "application/json"},
         json={
-            "client_id": OZON_PERF_CLIENT_ID,
-            "client_secret": OZON_PERF_CLIENT_SECRET,
+            "client_id": c["OZON_PERF_CLIENT_ID"],
+            "client_secret": c["OZON_PERF_CLIENT_SECRET"],
             "grant_type": "client_credentials",
         },
     )
@@ -325,10 +340,11 @@ def _download_and_parse(perf_headers: dict, uuid: str):
     return df, total_spent
 
 
-def get_ads_by_sku(date_from: str, date_to: str, period_name: str) -> pd.DataFrame:
+def get_ads_by_sku(date_from: str, date_to: str, period_name: str,
+                   creds=None) -> pd.DataFrame:
     print(f"\nДРР {period_name}: {date_from} — {date_to}")
 
-    token = _get_perf_token()
+    token = _get_perf_token(creds)
     if not token:
         return pd.DataFrame(columns=["sku", "ДРР"])
 
@@ -544,6 +560,7 @@ def main():
     print(f"Месяц: с {month_start.strftime('%d.%m.%Y')}")
 
     # Прайс
+    from config import PRICE_FILE
     price = load_price(PRICE_FILE)
 
     # Транзакции

@@ -16,25 +16,37 @@ import pandas as pd
 import requests
 import time
 
-from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
-
-HEADERS = {
-    "Client-Id": OZON_SELLER_CLIENT_ID,
-    "Api-Key": OZON_SELLER_API_KEY_V2,
-    "Content-Type": "application/json",
-}
-
 BASE = "https://api-seller.ozon.ru"
 
 
-def _fetch_names(offer_ids: list[str]) -> dict[str, str]:
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
+    return {
+        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+        "OZON_SELLER_API_KEY_V2": OZON_SELLER_API_KEY_V2,
+    }
+
+
+def _ozon_headers(creds):
+    c = _get_creds(creds)
+    return {
+        "Client-Id": c["OZON_SELLER_CLIENT_ID"],
+        "Api-Key": c.get("OZON_SELLER_API_KEY_V2", c.get("OZON_SELLER_API_KEY", "")),
+        "Content-Type": "application/json",
+    }
+
+
+def _fetch_names(offer_ids: list[str], creds=None) -> dict[str, str]:
     """Получить названия товаров по offer_id через /v3/product/info/list."""
+    headers = _ozon_headers(creds)
     names = {}
     for i in range(0, len(offer_ids), 1000):
         batch = offer_ids[i:i + 1000]
         resp = requests.post(
             f"{BASE}/v3/product/info/list",
-            headers=HEADERS,
+            headers=headers,
             json={"offer_id": batch},
         )
         if resp.status_code != 200:
@@ -46,7 +58,7 @@ def _fetch_names(offer_ids: list[str]) -> dict[str, str]:
     return names
 
 
-def get_ozon_prices(offer_ids: list[str] | None = None) -> pd.DataFrame:
+def get_ozon_prices(offer_ids: list[str] | None = None, creds=None) -> pd.DataFrame:
     """Загружает цены товаров из /v5/product/info/prices.
 
     Args:
@@ -56,6 +68,7 @@ def get_ozon_prices(offer_ids: list[str] | None = None) -> pd.DataFrame:
         DataFrame: offer_id, name, price, old_price,
                    marketing_seller_price, min_price
     """
+    headers = _ozon_headers(creds)
     t0 = time.time()
     all_items = []
 
@@ -78,7 +91,7 @@ def get_ozon_prices(offer_ids: list[str] | None = None) -> pd.DataFrame:
             if cursor:
                 body["cursor"] = cursor
 
-            resp = requests.post(f"{BASE}/v5/product/info/prices", headers=HEADERS, json=body)
+            resp = requests.post(f"{BASE}/v5/product/info/prices", headers=headers, json=body)
             if resp.status_code != 200:
                 print(f"  Ошибка цен Ozon: {resp.status_code} — {resp.text[:200]}")
                 break
@@ -119,7 +132,7 @@ def get_ozon_prices(offer_ids: list[str] | None = None) -> pd.DataFrame:
 
     # Получаем названия
     print(f"  Загрузка названий для {len(df)} товаров...")
-    names = _fetch_names(df["offer_id"].tolist())
+    names = _fetch_names(df["offer_id"].tolist(), creds)
     df["name"] = df["offer_id"].map(names).fillna("")
 
     elapsed = time.time() - t0

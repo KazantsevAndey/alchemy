@@ -21,12 +21,22 @@ import os
 import glob as glob_mod
 from datetime import datetime, timedelta
 
-from config import WB_API_KEY
+_HEADERS_CACHE = {}
 
-HEADERS = {
-    "Authorization": WB_API_KEY,
-    "Content-Type": "application/json",
-}
+
+def _get_creds(creds):
+    if creds:
+        return creds
+    from config import WB_API_KEY
+    return {"WB_API_KEY": WB_API_KEY}
+
+
+def _wb_headers(creds=None):
+    c = _get_creds(creds)
+    return {
+        "Authorization": c["WB_API_KEY"],
+        "Content-Type": "application/json",
+    }
 
 PROMO_BASE = "https://dp-calendar-api.wildberries.ru"
 PRICES_BASE = "https://discounts-prices-api.wildberries.ru"
@@ -36,29 +46,31 @@ STATS_BASE = "https://statistics-api.wildberries.ru"
 _RATE_LIMIT_DELAY = 0.7
 
 
-def _safe_get(url: str, params: dict | None = None) -> requests.Response:
+def _safe_get(url: str, params: dict | None = None, creds=None) -> requests.Response:
+    headers = _wb_headers(creds)
     time.sleep(_RATE_LIMIT_DELAY)
-    resp = requests.get(url, headers=HEADERS, params=params)
+    resp = requests.get(url, headers=headers, params=params)
     if resp.status_code == 429:
         print("  Rate limit, жду 6 сек...")
         time.sleep(6)
-        resp = requests.get(url, headers=HEADERS, params=params)
+        resp = requests.get(url, headers=headers, params=params)
     return resp
 
 
-def _safe_post(url: str, json_data: dict) -> requests.Response:
+def _safe_post(url: str, json_data: dict, creds=None) -> requests.Response:
+    headers = _wb_headers(creds)
     time.sleep(_RATE_LIMIT_DELAY)
-    resp = requests.post(url, headers=HEADERS, json=json_data)
+    resp = requests.post(url, headers=headers, json=json_data)
     if resp.status_code == 429:
         print("  Rate limit, жду 6 сек...")
         time.sleep(6)
-        resp = requests.post(url, headers=HEADERS, json=json_data)
+        resp = requests.post(url, headers=headers, json=json_data)
     return resp
 
 
 # ── Акции ────────────────────────────────────────────────────────────────
 
-def get_promotions(all_promo: bool = False) -> pd.DataFrame:
+def get_promotions(all_promo: bool = False, creds=None) -> pd.DataFrame:
     """Получает список акций (календарных).
 
     Args:
@@ -76,7 +88,7 @@ def get_promotions(all_promo: bool = False) -> pd.DataFrame:
         "offset": 0,
     }
 
-    resp = _safe_get(f"{PROMO_BASE}/api/v1/calendar/promotions", params=params)
+    resp = _safe_get(f"{PROMO_BASE}/api/v1/calendar/promotions", params=params, creds=creds)
     if resp.status_code != 200:
         print(f"Ошибка получения акций: {resp.status_code} — {resp.text[:300]}")
         return pd.DataFrame()
@@ -273,7 +285,7 @@ def remove_from_promo(promotion_id: int, nm_ids: list[int]) -> pd.DataFrame:
 
 # ── Остатки ──────────────────────────────────────────────────────────────
 
-def get_stocks() -> pd.DataFrame:
+def get_stocks(creds=None) -> pd.DataFrame:
     """Получает остатки на складах WB (supplier/stocks).
 
     Returns:
@@ -326,7 +338,7 @@ def get_stocks_summary() -> pd.DataFrame:
 
 # ── Цены и скидки ───────────────────────────────────────────────────────
 
-def get_prices(nm_ids: list[int] | None = None, only_in_stock: bool = False) -> pd.DataFrame:
+def get_prices(nm_ids: list[int] | None = None, only_in_stock: bool = False, creds=None) -> pd.DataFrame:
     """Получает текущие цены и скидки.
 
     Args:
@@ -636,7 +648,7 @@ def _find_column(df: pd.DataFrame, keywords: list[str]) -> str | None:
 
 # ── Сводный дашборд: артикул + текущая цена/маржа + цены акций ────────────
 
-def build_dashboard() -> pd.DataFrame:
+def build_dashboard(creds=None, price_path=None) -> pd.DataFrame:
     """Сводная таблица для дашборда.
 
     Колонки:
@@ -650,10 +662,12 @@ def build_dashboard() -> pd.DataFrame:
     т.к. WB API не отдаёт planPrice для автоакций.
     """
     from utils.price_loader import load_price, build_cost_map
-    from config import PRICE_FILE
 
     # 1. Себестоимость
-    price_df = load_price(PRICE_FILE)
+    if price_path is None:
+        from config import PRICE_FILE
+        price_path = PRICE_FILE
+    price_df = load_price(price_path)
     cost_map = build_cost_map(price_df, key_col="Артикул")
     name_map = dict(zip(
         price_df["Артикул"].astype(str).str.strip(),
