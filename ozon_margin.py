@@ -25,18 +25,21 @@ from utils.price_loader import load_price
 
 def _get_creds(creds):
     """Fallback to config.py if creds not provided."""
-    if creds:
+    if creds is not None:
         return creds
-    from config import (
-        OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY,
-        OZON_PERF_CLIENT_ID, OZON_PERF_CLIENT_SECRET,
-    )
-    return {
-        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
-        "OZON_SELLER_API_KEY": OZON_SELLER_API_KEY,
-        "OZON_PERF_CLIENT_ID": OZON_PERF_CLIENT_ID,
-        "OZON_PERF_CLIENT_SECRET": OZON_PERF_CLIENT_SECRET,
-    }
+    try:
+        from config import (
+            OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY,
+            OZON_PERF_CLIENT_ID, OZON_PERF_CLIENT_SECRET,
+        )
+        return {
+            "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+            "OZON_SELLER_API_KEY": OZON_SELLER_API_KEY,
+            "OZON_PERF_CLIENT_ID": OZON_PERF_CLIENT_ID,
+            "OZON_PERF_CLIENT_SECRET": OZON_PERF_CLIENT_SECRET,
+        }
+    except ImportError:
+        return {}
 
 
 def _seller_headers(creds):

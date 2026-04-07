@@ -26,14 +26,17 @@ YM_BASE = "https://api.partner.market.yandex.ru"
 
 
 def _get_creds(creds):
-    if creds:
+    if creds is not None:
         return creds
-    from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID
-    return {
-        "YM_API_KEY": YM_API_KEY,
-        "YM_CAMPAIGN_ID": YM_CAMPAIGN_ID,
-        "YM_BUSINESS_ID": YM_BUSINESS_ID,
-    }
+    try:
+        from config import YM_API_KEY, YM_CAMPAIGN_ID, YM_BUSINESS_ID
+        return {
+            "YM_API_KEY": YM_API_KEY,
+            "YM_CAMPAIGN_ID": YM_CAMPAIGN_ID,
+            "YM_BUSINESS_ID": YM_BUSINESS_ID,
+        }
+    except ImportError:
+        return {}
 
 
 def _ym_headers(creds):

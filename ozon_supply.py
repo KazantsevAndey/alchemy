@@ -25,13 +25,16 @@ QUANTUM_FILE = "quantum_stock.xlsx"
 
 
 def _get_creds(creds):
-    if creds:
+    if creds is not None:
         return creds
-    from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
-    return {
-        "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
-        "OZON_SELLER_API_KEY_V2": OZON_SELLER_API_KEY_V2,
-    }
+    try:
+        from config import OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY_V2
+        return {
+            "OZON_SELLER_CLIENT_ID": OZON_SELLER_CLIENT_ID,
+            "OZON_SELLER_API_KEY_V2": OZON_SELLER_API_KEY_V2,
+        }
+    except ImportError:
+        return {}
 
 
 def _ozon_headers(creds):

@@ -26,10 +26,13 @@ from utils.price_loader import load_price
 
 
 def _get_creds(creds):
-    if creds:
+    if creds is not None:
         return creds
-    from config import WB_API_KEY
-    return {"WB_API_KEY": WB_API_KEY}
+    try:
+        from config import WB_API_KEY
+        return {"WB_API_KEY": WB_API_KEY}
+    except ImportError:
+        return {}
 
 
 def _wb_headers(creds):
