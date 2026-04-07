@@ -55,6 +55,7 @@ ALL_KEYS = [
     "oz_tx_m", "oz_final_m", "oz_nach_m",
     "wb_df_y", "wb_sum_y", "wb_agg_y",
     "wb_df_m", "wb_sum_m", "wb_agg_m",
+    "ym_margin_y", "ym_margin_m",
     "stock_turnover",
     "wb_promos_dash",
     "oz_prices",
@@ -146,6 +147,28 @@ def refresh_all_data() -> dict:
     wb_agg_m = wb_calc_unit_economics(wb_df_m, price, wb_ads_m)
     for k, v in [("wb_df_m", wb_df_m), ("wb_sum_m", wb_sum_m), ("wb_agg_m", wb_agg_m)]:
         save(k, v)
+
+    # ── YM Маржа ─────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("YM МАРЖА")
+    print("=" * 60)
+    from ym_margin import load_services_report, calc_margin as ym_calc_margin
+    from utils.price_loader import build_cost_map
+    ym_cost_map = build_cost_map(price)
+
+    # Вчера
+    print("YM: данные за вчера...")
+    ym_rev_y, ym_costs_y, ym_totals_y = load_services_report(dy, dy)
+    ym_R_y = ym_calc_margin(ym_rev_y, ym_costs_y, ym_totals_y,
+                             ym_cost_map, f"YM Вчера ({dy})")
+    save("ym_margin_y", {"R": ym_R_y, "totals": ym_totals_y})
+
+    # Месяц
+    print("YM: данные за месяц...")
+    ym_rev_m, ym_costs_m, ym_totals_m = load_services_report(dm, dy)
+    ym_R_m = ym_calc_margin(ym_rev_m, ym_costs_m, ym_totals_m,
+                             ym_cost_map, f"YM Месяц ({dm} — {dy})")
+    save("ym_margin_m", {"R": ym_R_m, "totals": ym_totals_m})
 
     # ── Остатки Ozon ──────────────────────────────────────────────────
     print("\n" + "=" * 60)

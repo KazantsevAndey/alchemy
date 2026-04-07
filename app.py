@@ -175,14 +175,33 @@ def _wb_expenses(df_key, sum_key):
             expenses["Баллы лояльности"] = round(float(wb_sum["loyal_balls"]), 0)
     return {"total": round(sum(expenses.values()), 0), "items": expenses}
 
+def _ym_ai_summary(d):
+    """Extract YM summary for AI signal from cached data."""
+    if d is None:
+        return {"rev": 0, "profit": 0, "margin": 0}
+    R = d["R"]
+    totals = d["totals"]
+    if R is None or R.empty:
+        return {"rev": 0, "profit": 0, "margin": 0}
+    rev = R["revenue"].sum()
+    costs = sum(totals.values())
+    sebes = R["sebes_total"].sum()
+    profit = rev - costs - sebes
+    margin = (profit / rev * 100) if rev else 0
+    return {"rev": rev, "profit": profit, "margin": margin}
+
 def _build_full_json():
     """Build full metrics JSON for AI signal (Сводка)."""
     oz_y = _oz(C("oz_final_y"), C("oz_nach_y"))
     wb_y = _wb(C("wb_sum_y"), C("wb_agg_y"))
     oz_m = _oz(C("oz_final_m"), C("oz_nach_m"))
     wb_m = _wb(C("wb_sum_m"), C("wb_agg_m"))
-    t_y_rev = oz_y["rev"] + wb_y["rev"]; t_y_prf = oz_y["profit"] + wb_y["profit"]
-    t_m_rev = oz_m["rev"] + wb_m["rev"]; t_m_prf = oz_m["profit"] + wb_m["profit"]
+    ym_y_ai = _ym_ai_summary(C("ym_margin_y"))
+    ym_m_ai = _ym_ai_summary(C("ym_margin_m"))
+    t_y_rev = oz_y["rev"] + wb_y["rev"] + ym_y_ai["rev"]
+    t_y_prf = oz_y["profit"] + wb_y["profit"] + ym_y_ai["profit"]
+    t_m_rev = oz_m["rev"] + wb_m["rev"] + ym_m_ai["rev"]
+    t_m_prf = oz_m["profit"] + wb_m["profit"] + ym_m_ai["profit"]
 
     def _s(d, with_drr=False):
         r = {"revenue": round(float(d["rev"]), 0), "profit": round(float(d["profit"]), 0),
@@ -218,16 +237,20 @@ def _build_full_json():
             nm = r["Наименование"] if pd.notna(r.get("Наименование")) else r["sa_name"]
             low_margin.append({"name": nm, "margin_pct": round(float(r["margin"]), 1), "marketplace": "WB"})
 
+    def _ym_s(d):
+        return {"revenue": round(float(d["rev"]), 0), "profit": round(float(d["profit"]), 0),
+                "margin_pct": round(float(d["margin"]), 1)}
+
     return {
         "period": {"day": YSTR, "month_start": month_start.strftime("%Y-%m-%d"), "month_end": yesterday.strftime("%Y-%m-%d")},
         "summary": {
             "yesterday": {
-                "ozon": _s(oz_y), "wb": _s(wb_y),
+                "ozon": _s(oz_y), "wb": _s(wb_y), "ym": _ym_s(ym_y_ai),
                 "total": {"revenue": round(t_y_rev, 0), "profit": round(t_y_prf, 0),
                            "margin_pct": round(t_y_prf / t_y_rev * 100, 1) if t_y_rev else 0}
             },
             "month": {
-                "ozon": _s(oz_m, with_drr=True), "wb": _s(wb_m),
+                "ozon": _s(oz_m, with_drr=True), "wb": _s(wb_m), "ym": _ym_s(ym_m_ai),
                 "total": {"revenue": round(t_m_rev, 0), "profit": round(t_m_prf, 0),
                            "margin_pct": round(t_m_prf / t_m_rev * 100, 1) if t_m_rev else 0}
             },
@@ -263,6 +286,88 @@ def _build_mp_json(mp):
             "top_sku": full["top_sku_month"]["wb"],
             "low_margin_sku": [s for s in full["low_margin_sku"] if s["marketplace"] == "WB"],
         }
+
+def _build_summary_text(full_json):
+    """Build flat text summary for DeepSeek from full_json metrics."""
+    s = full_json["summary"]
+    oy = s["yesterday"]["ozon"]; wy = s["yesterday"]["wb"]; ty = s["yesterday"]["total"]
+    ymy = s["yesterday"].get("ym", {"revenue": 0, "profit": 0, "margin_pct": 0})
+    om = s["month"]["ozon"]; wm = s["month"]["wb"]; tm = s["month"]["total"]
+    ymm = s["month"].get("ym", {"revenue": 0, "profit": 0, "margin_pct": 0})
+
+    p = full_json["period"]
+    lines = [
+        f"СВОДКА МАРКЕТПЛЕЙСЫ",
+        f"Период: {p['month_start']} — {p['month_end']}",
+        "",
+        "ВЧЕРА:",
+        f"Ozon: выручка {_fm(oy['revenue'])} ₽, прибыль {_fm(oy['profit'])} ₽, маржинальность {oy['margin_pct']}%",
+        f"WB: выручка {_fm(wy['revenue'])} ₽, прибыль {_fm(wy['profit'])} ₽, маржинальность {wy['margin_pct']}%",
+        f"ЯМ: выручка {_fm(ymy['revenue'])} ₽, прибыль {_fm(ymy['profit'])} ₽, маржинальность {ymy['margin_pct']}%",
+        f"Итого: выручка {_fm(ty['revenue'])} ₽, прибыль {_fm(ty['profit'])} ₽, маржинальность {ty['margin_pct']}%",
+        "",
+        "МЕСЯЦ (нарастающий итог):",
+        f"Ozon: выручка {_fm(om['revenue'])} ₽, прибыль {_fm(om['profit'])} ₽, маржинальность {om['margin_pct']}%",
+        f"WB: выручка {_fm(wm['revenue'])} ₽, прибыль {_fm(wm['profit'])} ₽, маржинальность {wm['margin_pct']}%",
+        f"ЯМ: выручка {_fm(ymm['revenue'])} ₽, прибыль {_fm(ymm['profit'])} ₽, маржинальность {ymm['margin_pct']}%",
+        f"Итого: выручка {_fm(tm['revenue'])} ₽, прибыль {_fm(tm['profit'])} ₽, маржинальность {tm['margin_pct']}%",
+    ]
+
+    # Expenses
+    for period_label, exp_key in [("месяц", "expenses_month")]:
+        for mp, mp_label in [("ozon", "OZON"), ("wb", "WB")]:
+            exp = full_json[exp_key][mp]
+            total = exp["total"]
+            items = exp["items"]
+            if items:
+                lines.append("")
+                lines.append(f"СТРУКТУРА РАСХОДОВ {mp_label} ({period_label}, всего {_fm(total)} ₽):")
+                sorted_items = sorted(items.items(), key=lambda x: x[1], reverse=True)
+                for name, val in sorted_items:
+                    pct = f" ({val / total * 100:.0f}%)" if total and val / total > 0.1 else ""
+                    lines.append(f"{name}: {_fm(val)}{pct}")
+
+    # DRR
+    drr_val = om.get("drr_total", 0)
+    lines.append(f"\nДРР (реклама Ozon, месяц): {_fm(drr_val)} ₽" if drr_val else "\nДРР: нет данных")
+
+    lines.append("\nЦЕЛЕВОЙ БЕНЧМАРК: маржинальность 30%")
+    return "\n".join(lines)
+
+
+_DEEPSEEK_SIGNAL_SYSTEM = """Ты — AI-аналитик платформы Алхимия. Анализируешь данные маркетплейсов и даёшь краткие однозначные оценки. Без воды, без вступлений.
+
+Целевая маржинальность продавца: 30%. Ниже 20% — плохо. 20-30% — терпимо, нужно улучшать. Выше 30% — хорошо.
+
+На основе переданных данных дай оценку в 4-6 предложений:
+- Общая оценка: как дела относительно цели 30%
+- Сравнение площадок: где лучше, где хуже, почему (смотри на структуру расходов)
+- Главная проблема: что больше всего тянет маржу вниз
+- Что делать: одна конкретная рекомендация
+
+Пиши по-русски, кратко, прямо. Не используй списки и заголовки — просто связный текст."""
+
+
+def _deepseek_call(system_prompt, user_prompt):
+    """Call DeepSeek via OpenAI-compatible API, return answer or None."""
+    try:
+        from config import DEEPSEEK_API_KEY
+    except ImportError:
+        DEEPSEEK_API_KEY = ""
+    if not DEEPSEEK_API_KEY:
+        return None
+    import openai
+    client = openai.OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=400,
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content
 
 def _giga_call(system_prompt, user_prompt):
     """Call GigaChat, return answer or None."""
@@ -434,9 +539,10 @@ def _show_mp_auto_fallback(mp_json, brand_color):
 CARD_TITLES = {
     "Ozon": ("OZON", "#2563eb"),
     "WB":   ("WILDBERRIES", "#7c3aed"),
+    "ЯМ":   ("ЯНДЕКС МАРКЕТ", "#ca8a04"),
     "Итого": ("ИТОГО", "#1e293b"),
 }
-CARD_NAVS = {"Ozon": "🔵 Ozon", "WB": "🟣 WB"}
+CARD_NAVS = {"Ozon": "🔵 Ozon", "WB": "🟣 WB", "ЯМ": "🟡 Яндекс Маркет"}
 
 def _card(title, rev, profit, margin, btn_key=None):
     """Clickable card with hover translateY effect."""
@@ -491,7 +597,7 @@ def _card(title, rev, profit, margin, btn_key=None):
         )
 
 def _summary_row(label, oz, wb, suffix=""):
-    """Render one row of 3 cards: Ozon | WB | Итого."""
+    """Render one row of cards: Ozon | WB | Итого."""
     t_rev = oz["rev"] + wb["rev"]
     t_prf = oz["profit"] + wb["profit"]
     t_mar = (t_prf / t_rev * 100) if t_rev else 0
@@ -511,7 +617,7 @@ def _summary_row(label, oz, wb, suffix=""):
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════
 
-_NAV_MAP = {"Ozon": "🔵 Ozon", "WB": "🟣 WB"}
+_NAV_MAP = {"Ozon": "🔵 Ozon", "WB": "🟣 WB", "YM": "🟡 Яндекс Маркет"}
 
 # Handle ?nav= query parameter from clickable cards/donuts
 qp = st.query_params
@@ -530,6 +636,7 @@ with st.sidebar:
         "⚗️ Сводка",
         "🔵 Ozon",
         "🟣 WB",
+        "🟡 Яндекс Маркет",
         "🚛 Поставки",
     ]
     nav_idx = 0
@@ -582,22 +689,66 @@ if page == "⚗️ Сводка":
     # ── AI-сигнал ──
     if st.button("🤖 AI-сигнал", key="main_ai_signal", type="secondary"):
         full_json = _build_full_json()
+        summary_text = _build_summary_text(full_json)
+        margin_month = full_json["summary"]["month"]["total"]["margin_pct"]
+
+        # Цветной индикатор — определяется Python
+        if margin_month >= 30:
+            _sig_status, _sig_icon = "green", "✅"
+            _sig_border, _sig_bg, _sig_text_c = "#86efac", "linear-gradient(135deg,#f0fdf4,#ecfdf5)", "#166534"
+        elif margin_month >= 20:
+            _sig_status, _sig_icon = "yellow", "⚠️"
+            _sig_border, _sig_bg, _sig_text_c = "#fde68a", "linear-gradient(135deg,#fefce8,#fffbeb)", "#854d0e"
+        else:
+            _sig_status, _sig_icon = "red", "🔴"
+            _sig_border, _sig_bg, _sig_text_c = "#fca5a5", "linear-gradient(135deg,#fef2f2,#fff1f2)", "#991b1b"
+
         answer = None
         with st.spinner("Анализирую..."):
+            # DeepSeek (приоритет) → GigaChat (фоллбэк)
             try:
-                answer = _giga_call(_SIGNAL_SYSTEM, _json.dumps(full_json, ensure_ascii=False))
+                answer = _deepseek_call(_DEEPSEEK_SIGNAL_SYSTEM, summary_text)
             except Exception:
                 pass
+            if not answer:
+                try:
+                    answer = _giga_call(_SIGNAL_SYSTEM, _json.dumps(full_json, ensure_ascii=False))
+                except Exception:
+                    pass
+
         if answer:
-            _show_signal_card(answer)
+            # DeepSeek возвращает текст → показываем в цветной карточке
+            # Пробуем распарсить как JSON (если GigaChat ответил)
+            _parsed_json = False
+            try:
+                txt = answer.strip()
+                if txt.startswith("```"):
+                    txt = txt.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                data = _json.loads(txt)
+                # GigaChat JSON format — use _show_signal_card
+                _show_signal_card(answer)
+                _parsed_json = True
+            except Exception:
+                pass
+
+            if not _parsed_json:
+                # DeepSeek text format — show in colored card
+                st.markdown(
+                    f'<div style="border:2px solid {_sig_border};border-radius:14px;padding:20px 24px;'
+                    f'background:{_sig_bg};box-shadow:0 1px 3px rgba(0,0,0,0.04);margin-top:12px">'
+                    f'<div style="font-size:18px;font-weight:700;color:{_sig_text_c};margin-bottom:8px">'
+                    f'{_sig_icon} Маржинальность {margin_month:.1f}%</div>'
+                    f'<div style="font-size:14px;color:#1e293b;line-height:1.7;white-space:pre-wrap">'
+                    f'{answer}</div></div>', unsafe_allow_html=True)
         else:
             st.warning("AI временно недоступен")
             fb = _show_auto_fallback(full_json)
             st.markdown(
-                f'<div style="border:2px solid #fde68a;border-radius:14px;padding:20px 24px;'
-                f'background:linear-gradient(135deg,#fefce8,#fffbeb);'
+                f'<div style="border:2px solid {_sig_border};border-radius:14px;padding:20px 24px;'
+                f'background:{_sig_bg};'
                 f'box-shadow:0 1px 3px rgba(0,0,0,0.04);margin-top:12px">'
-                f'<div style="font-size:13px;font-weight:700;color:#854d0e;margin-bottom:10px">📊 Автоматический анализ</div>'
+                f'<div style="font-size:13px;font-weight:700;color:{_sig_text_c};margin-bottom:10px">'
+                f'{_sig_icon} Автоматический анализ (маржа {margin_month:.1f}%)</div>'
                 f'<div style="font-size:14px;color:#1e293b;line-height:1.7">'
                 + "<br>".join(fb).replace("\n", "<br>")
                 + '</div></div>', unsafe_allow_html=True)
@@ -1397,6 +1548,250 @@ elif page == "🟣 WB":
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 🟡 Яндекс Маркет
+# ══════════════════════════════════════════════════════════════════════════
+
+elif page == "🟡 Яндекс Маркет":
+    ym_y = C("ym_margin_y")
+    ym_m = C("ym_margin_m")
+    if ym_m is None:
+        st.warning("Нет данных ЯМ. Обновите кэш.")
+        st.stop()
+
+    from ym_margin import SVC_ORDER as YM_SVC_ORDER, SVC_MAIN as YM_SVC_MAIN
+
+    def _ym_summary(d):
+        """Extract summary metrics from cached YM margin data."""
+        if d is None:
+            return {"rev": 0, "profit": 0, "margin": 0, "sku": 0}
+        R = d["R"]
+        totals = d["totals"]
+        if R is None or R.empty:
+            return {"rev": 0, "profit": 0, "margin": 0, "sku": 0}
+        rev = R["revenue"].sum()
+        costs = sum(totals.values())
+        sebes = R["sebes_total"].sum()
+        profit = rev - costs - sebes
+        margin = (profit / rev * 100) if rev else 0
+        return {"rev": rev, "profit": profit, "margin": margin,
+                "sku": len(R[R["qty"] > 0]), "costs": costs, "sebes": sebes}
+
+    ymy = _ym_summary(ym_y)
+    ymm = _ym_summary(ym_m)
+
+    # ── 3 cards ──
+    def _info_card_ym(html):
+        st.markdown(
+            f'<div style="border:1px solid #e5e7eb;border-radius:14px;padding:20px 24px;'
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.04);background:#fff;height:100%">{html}</div>',
+            unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3, gap="medium")
+    with c1:
+        _info_card_ym(
+            f'<div style="font-size:28px;font-weight:800;color:#ca8a04;margin-bottom:12px;letter-spacing:1px">ЯНДЕКС МАРКЕТ</div>'
+            f'<div style="font-size:12px;color:#9ca3af">SKU с продажами (месяц)</div>'
+            f'<div style="font-size:20px;font-weight:700;color:#1e293b">{ymm["sku"]}</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:6px">{MSTR}</div>'
+        )
+    with c2:
+        ym_yc = "#16a34a" if ymy["margin"] >= 30 else "#ca8a04" if ymy["margin"] >= 15 else "#dc2626"
+        yp_c = "#16a34a" if ymy["profit"] >= 0 else "#dc2626"
+        _info_card_ym(
+            f'<div style="font-size:12px;font-weight:700;color:#9ca3af;letter-spacing:1px;margin-bottom:8px">ВЧЕРА</div>'
+            f'<div style="display:flex;align-items:center;gap:16px">'
+            f'<div style="flex:1">'
+            f'<div style="font-size:11px;color:#9ca3af">Выручка</div>'
+            f'<div style="font-size:15px;font-weight:600;color:#1e293b;font-feature-settings:\'tnum\'">{_fm(ymy["rev"])} ₽</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:4px">Прибыль</div>'
+            f'<div style="font-size:15px;font-weight:600;color:{yp_c};font-feature-settings:\'tnum\'">{_fm(ymy["profit"])} ₽</div>'
+            f'</div>'
+            f'<div style="text-align:right">'
+            f'<div style="font-size:11px;color:#9ca3af">Маржа</div>'
+            f'<div style="font-size:40px;font-weight:800;color:{ym_yc};line-height:1.1;font-feature-settings:\'tnum\'">{ymy["margin"]:.1f}%</div>'
+            f'</div></div>'
+        )
+    with c3:
+        ym_mc = "#16a34a" if ymm["margin"] >= 30 else "#ca8a04" if ymm["margin"] >= 15 else "#dc2626"
+        mp_c = "#16a34a" if ymm["profit"] >= 0 else "#dc2626"
+        _info_card_ym(
+            f'<div style="font-size:12px;font-weight:700;color:#9ca3af;letter-spacing:1px;margin-bottom:8px">МЕСЯЦ</div>'
+            f'<div style="display:flex;align-items:center;gap:16px">'
+            f'<div style="flex:1">'
+            f'<div style="font-size:11px;color:#9ca3af">Выручка</div>'
+            f'<div style="font-size:15px;font-weight:600;color:#1e293b;font-feature-settings:\'tnum\'">{_fm(ymm["rev"])} ₽</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:4px">Прибыль</div>'
+            f'<div style="font-size:15px;font-weight:600;color:{mp_c};font-feature-settings:\'tnum\'">{_fm(ymm["profit"])} ₽</div>'
+            f'</div>'
+            f'<div style="text-align:right">'
+            f'<div style="font-size:11px;color:#9ca3af">Маржа</div>'
+            f'<div style="font-size:40px;font-weight:800;color:{ym_mc};line-height:1.1;font-feature-settings:\'tnum\'">{ymm["margin"]:.1f}%</div>'
+            f'</div></div>'
+        )
+
+    st.divider()
+
+    # ── Период toggle ──
+    ym_period = st.radio("Период", ["Вчера", "Месяц"], horizontal=True, key="ym_period")
+    ym_data = ym_y if ym_period == "Вчера" else ym_m
+    if ym_data is None:
+        st.info("Нет данных за выбранный период")
+        st.stop()
+
+    ym_R = ym_data["R"]
+    ym_totals = ym_data["totals"]
+
+    # ── Структура расходов (pie chart) ──
+    st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>СТРУКТУРА РАСХОДОВ (ГРОСС)</div>', unsafe_allow_html=True)
+
+    svc_items = [(k, v) for k, v in ym_totals.items() if v > 0]
+    if svc_items:
+        col_pie, col_tbl = st.columns([1, 1])
+        with col_pie:
+            svc_df = pd.DataFrame(svc_items, columns=["Услуга", "Сумма"])
+            fig_pie = px.pie(
+                svc_df, values="Сумма", names="Услуга",
+                color_discrete_sequence=["#ca8a04", "#f59e0b", "#fbbf24", "#fcd34d",
+                                         "#fde68a", "#fef3c7", "#d97706", "#b45309"],
+                hole=0.45,
+            )
+            fig_pie.update_traces(textposition="inside", textinfo="percent+label",
+                                  textfont_size=11)
+            fig_pie.update_layout(
+                height=350, margin=dict(t=10, b=10, l=10, r=10),
+                showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_pie, use_container_width=True, key="ym_pie",
+                            config={"displayModeBar": False})
+        with col_tbl:
+            gross_svc = sum(ym_totals.values())
+            lines = []
+            for svc in YM_SVC_ORDER:
+                val = ym_totals.get(svc, 0)
+                if val > 0:
+                    pct = val / gross_svc * 100 if gross_svc else 0
+                    lines.append(f"  {svc}: **{_fm(val)}** ₽ ({pct:.0f}%)")
+            lines.append(f"  **ИТОГО: {_fm(gross_svc)} ₽**")
+            st.markdown("\n".join(lines))
+
+    # ── SKU таблица ──
+    st.divider()
+    st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>ЮНИТ-ЭКОНОМИКА ПО SKU</div>', unsafe_allow_html=True)
+
+    if ym_R is not None and not ym_R.empty:
+        # Filters
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            ym_q = st.text_input("Поиск SKU / название", key="ym_q",
+                                  placeholder="Артикул или название...",
+                                  label_visibility="collapsed")
+        with fc2:
+            ym_mr_from = st.number_input("Маржа от %", value=-100, step=1, key="ym_mr_from")
+        with fc3:
+            ym_mr_to = st.number_input("Маржа до %", value=80, step=1, key="ym_mr_to")
+
+        # Build display table
+        tbl = ym_R.copy()
+        # Колонки уже правильные из calc_margin:
+        # sku, name, qty, revenue, Размещение..Перевод, Прочее, Затраты,
+        # sebes_unit, sebes_total, Прибыль, Маржа_pct
+
+        display_cols = ["sku", "name", "qty", "revenue"]
+        display_cols += [s for s in YM_SVC_MAIN if s in tbl.columns]
+        display_cols += ["Прочее", "Затраты", "sebes_unit", "sebes_total", "Прибыль", "Маржа_pct"]
+
+        rename = {
+            "sku": "Артикул", "name": "Название", "qty": "Шт",
+            "revenue": "Выручка", "Затраты": "Затраты итого",
+            "sebes_unit": "Себест/шт", "sebes_total": "Себестоимость",
+            "Маржа_pct": "Маржа %",
+        }
+
+        tbl = tbl[[c for c in display_cols if c in tbl.columns]].copy()
+        tbl = tbl.rename(columns=rename)
+
+        # Apply filters
+        if ym_q:
+            tbl = tbl[tbl["Артикул"].astype(str).str.contains(ym_q, case=False, na=False) |
+                       tbl["Название"].astype(str).str.contains(ym_q, case=False, na=False)]
+        tbl = tbl[(tbl["Маржа %"] >= ym_mr_from) & (tbl["Маржа %"] <= ym_mr_to)]
+
+        fmt = {"Выручка": "{:,.0f}", "Себестоимость": "{:,.0f}", "Затраты итого": "{:,.0f}",
+               "Прибыль": "{:,.0f}", "Маржа %": "{:.1f}%",
+               "Себест/шт": "{:,.0f}", "Прочее": "{:,.0f}"}
+        for s in YM_SVC_MAIN:
+            fmt[s] = "{:,.0f}"
+
+        styled = (tbl.style.format(fmt, na_rep="—")
+                  .map(_margin_bar, subset=["Маржа %"]))
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
+        st.caption(f"{len(tbl)} SKU")
+
+        # ── Топ-15 по выручке ──
+        st.divider()
+        st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>ТОП-15 SKU ПО ВЫРУЧКЕ</div>', unsafe_allow_html=True)
+
+        top15 = ym_R[ym_R["qty"] > 0].sort_values("revenue", ascending=False).head(15)
+        top15 = top15.sort_values("revenue", ascending=True)
+        top15["short"] = top15["name"].str[:40]
+
+        fig_top = go.Figure(go.Bar(
+            y=top15["short"], x=top15["revenue"],
+            orientation="h",
+            marker_color="#ca8a04",
+            customdata=list(zip(
+                top15["name"], top15["revenue"], top15["Прибыль"], top15["Маржа_pct"],
+            )),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Выручка: %{customdata[1]:,.0f} ₽<br>"
+                "Прибыль: %{customdata[2]:,.0f} ₽<br>"
+                "Маржа: %{customdata[3]:.1f}%"
+                "<extra></extra>"
+            ),
+        ))
+        fig_top.update_layout(
+            height=520,
+            margin=dict(l=10, r=10, t=10, b=10),
+            bargap=0.3,
+            showlegend=False,
+            xaxis_title="Выручка, ₽",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+
+        with st.container(border=True):
+            st.plotly_chart(fig_top, use_container_width=True, key="ym_top15",
+                            config={"displayModeBar": False})
+
+        # ── Excel export ──
+        st.divider()
+        import io as _io_ym_margin
+        ym_buf = _io_ym_margin.BytesIO()
+        export_cols = ["sku", "name", "qty", "revenue"]
+        export_cols += [s for s in YM_SVC_MAIN if s in ym_R.columns]
+        export_cols += ["Прочее", "Затраты", "sebes_unit", "sebes_total", "Прибыль", "Маржа_pct"]
+        export_df = ym_R[[c for c in export_cols if c in ym_R.columns]].copy()
+        exp_rename = {
+            "sku": "Артикул", "name": "Название", "qty": "Шт",
+            "revenue": "Выручка", "Затраты": "Затраты итого",
+            "sebes_unit": "Себест/шт", "sebes_total": "Себестоимость",
+            "Маржа_pct": "Маржа %",
+        }
+        export_df = export_df.rename(columns=exp_rename)
+        export_df.to_excel(ym_buf, index=False, sheet_name="ЯМ Маржа")
+        st.download_button(
+            "Скачать Excel", data=ym_buf.getvalue(),
+            file_name=f"ym_margin_{ym_period.lower()}_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="ym_margin_download",
+        )
+    else:
+        st.info("Нет данных по SKU")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 📦 Остатки
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1459,7 +1854,7 @@ elif page == "📦 Остатки":
 elif page == "🚛 Поставки":
     st.title("Планирование поставок")
 
-    mp_choice = st.radio("Маркетплейс", ["Ozon", "WB"], horizontal=True, key="supply_mp")
+    mp_choice = st.radio("Маркетплейс", ["Ozon", "WB", "Yandex Market"], horizontal=True, key="supply_mp")
 
     def _cluster_status(days):
         if days < 14: return "СРОЧНО"
@@ -1573,6 +1968,122 @@ elif page == "🚛 Поставки":
             file_name=f"wb_supply_plan_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="wb_supply_download",
+        )
+
+        st.stop()
+
+    # ── Yandex Market ──
+    if mp_choice == "Yandex Market":
+        st.caption("Яндекс Маркет FBY/FBS")
+
+        ym_lk_file = st.file_uploader(
+            "Файл «Остатки по кластерам» из ЛК ЯМ (необязательно)",
+            type=["xlsx", "xls"],
+            key="ym_supply_lk_file",
+            help="Скачайте из ЛК ЯМ → Аналитика → Остатки по кластерам. "
+                 "Если не загружен — данные возьмутся из API (менее точно).",
+        )
+
+        ymc1, ymc2 = st.columns([1, 3])
+        with ymc1:
+            ym_depth = st.number_input("Глубина поставки, дней", min_value=14, max_value=180,
+                                       value=60, step=7, key="ym_supply_depth")
+        with ymc2:
+            st.write("")
+            st.write("")
+            ym_calc_btn = st.button("Рассчитать", type="primary", key="ym_supply_calc")
+
+        if ym_calc_btn:
+            lk_bytes = ym_lk_file.getvalue() if ym_lk_file else None
+            spinner_msg = ("Парсинг файла из ЛК и расчёт..." if lk_bytes
+                           else "Загрузка данных из API Яндекс Маркет и расчёт...")
+            with st.spinner(spinner_msg):
+                from ym_supply import compute_ym_supply_data
+                ym_result = compute_ym_supply_data(days_plan=ym_depth, lk_file_bytes=lk_bytes)
+                st.session_state["ym_supply_result"] = ym_result
+                st.session_state["ym_supply_depth_used"] = ym_depth
+
+        ym_result = st.session_state.get("ym_supply_result")
+        if ym_result is None:
+            st.info("Нажмите «Рассчитать» для загрузки данных")
+            st.stop()
+
+        ym_depth_used = st.session_state.get("ym_supply_depth_used", 60)
+        ym_cp = ym_result["cluster_priority"]
+        ym_plan = ym_result["plan"]
+
+        # Справочная строка
+        ym_total_order = int(ym_plan["order"].sum())
+        ym_total_price = (ym_plan["order"] * ym_plan["price"].fillna(0)).sum()
+        ym_total_sku = ym_plan[ym_plan["order"] > 0]["sku"].nunique()
+        ym_source = ym_result.get("source", "api")
+        ym_source_label = "ЛК-файл" if ym_source == "lk" else "API"
+        st.markdown(
+            f'<div style="background:#fff;border:1px solid #e5e7eb;border-radius:14px;'
+            f'padding:14px 20px;margin:16px 0;font-size:15px;font-weight:600;'
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
+            f'К отгрузке: <b>{_fm(ym_total_order)}</b> шт · '
+            f'<b>{_fm(ym_total_price)}</b> ₽ · '
+            f'<b>{ym_total_sku}</b> SKU · '
+            f'Глубина: <b>{ym_depth_used}</b> дней · '
+            f'Источник: <b>{ym_source_label}</b></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Приоритет отгрузки
+        st.markdown(
+            '<div class="section-label"><span class="section-dot" style="background:#fc0"></span>'
+            'ПРИОРИТЕТ ОТГРУЗКИ</div>', unsafe_allow_html=True)
+        st.caption("Кластеры с минимальным запасом — грузим первыми")
+
+        ym_cp_disp = ym_cp[["Кластер", "Дней запаса", "Заказать"]].copy()
+        ym_cp_disp["Дней запаса"] = ym_cp_disp["Дней запаса"].astype(int)
+        ym_cp_disp["Заказать"] = ym_cp_disp["Заказать"].astype(int)
+        ym_cp_disp["Статус"] = ym_cp_disp["Дней запаса"].apply(_cluster_status)
+
+        with st.container(border=True):
+            st.dataframe(
+                ym_cp_disp.style
+                .format({"Заказать": "{:,.0f}"})
+                .map(_cluster_color, subset=["Статус"])
+                .map(_sc, subset=["Дней запаса"]),
+                use_container_width=True, hide_index=True,
+            )
+
+        # Раскрытие по кластерам
+        for _, row in ym_cp_disp.iterrows():
+            cl_name = row["Кластер"]
+            cl_plan = ym_plan[ym_plan["cluster"] == cl_name].copy()
+            cl_plan = cl_plan[cl_plan["order"] > 0].sort_values("order", ascending=False)
+            if cl_plan.empty:
+                continue
+            with st.expander(f"{cl_name} — {int(row['Дней запаса'])}д, заказать {int(row['Заказать'])} шт"):
+                ct = cl_plan[["name", "sku", "stock_total", "daily", "days", "order"]].copy()
+                ct.columns = ["Название", "Артикул", "Остаток", "Прод/день", "Дней", "Заказать"]
+                ct["Остаток"] = ct["Остаток"].astype(int)
+                ct["Дней"] = ct["Дней"].astype(int)
+                ct["Заказать"] = ct["Заказать"].astype(int)
+                st.dataframe(
+                    ct.style.format({"Прод/день": "{:.1f}"}).map(_sc, subset=["Дней"]),
+                    use_container_width=True, hide_index=True,
+                )
+
+        # ── Скачать Excel ──
+        st.divider()
+        import io as _io_ym
+        ym_buf = _io_ym.BytesIO()
+        ym_export = ym_plan[ym_plan["order"] > 0][
+            ["name", "sku", "cluster", "stock_total", "daily", "days", "need", "quant", "order", "price"]
+        ].copy()
+        ym_export.columns = ["Название", "Артикул", "Кластер", "Остаток", "Прод/день",
+                             "Дней запаса", "Потребность", "Квант", "Заказать", "Цена"]
+        ym_export.to_excel(ym_buf, index=False, sheet_name="План ЯМ")
+        st.download_button(
+            "Скачать план поставок (Excel)",
+            data=ym_buf.getvalue(),
+            file_name=f"ym_supply_plan_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="ym_supply_download",
         )
 
         st.stop()

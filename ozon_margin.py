@@ -244,25 +244,37 @@ def _get_search_promo_spend(perf_headers: dict, date_from: str, date_to: str) ->
 
 
 def _request_report(perf_headers: dict, campaign_ids: list, date_from: str, date_to: str):
-    resp = requests.post(
-        "https://api-performance.ozon.ru/api/client/statistics",
-        headers=perf_headers,
-        json={
-            "campaigns": campaign_ids,
-            "dateFrom": date_from,
-            "dateTo": date_to,
-            "groupBy": "DATE",
-        },
-    )
-    if resp.status_code == 200:
-        return resp.json().get("UUID"), None
-    return None, str(resp.status_code)
+    for attempt in range(3):
+        resp = requests.post(
+            "https://api-performance.ozon.ru/api/client/statistics",
+            headers=perf_headers,
+            json={
+                "campaigns": campaign_ids,
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                "groupBy": "DATE",
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("UUID"), None
+        if resp.status_code == 429:
+            wait = 30 * (attempt + 1)
+            print(f"      Rate limit 429, жду {wait}с...")
+            time.sleep(wait)
+            continue
+        return None, str(resp.status_code)
+    return None, "429 (после 3 попыток)"
 
 
-def _wait_for_report(perf_headers: dict, uuid: str, max_wait: int = 180) -> bool:
+def _wait_for_report(perf_headers: dict, uuid: str, max_wait: int = 300) -> bool:
     url = f"https://api-performance.ozon.ru/api/client/statistics/{uuid}"
     for i in range(max_wait // 10):
-        resp = requests.get(url, headers=perf_headers)
+        try:
+            resp = requests.get(url, headers=perf_headers, timeout=15)
+        except requests.exceptions.RequestException:
+            time.sleep(10)
+            continue
         if resp.status_code == 200:
             state = resp.json().get("state", "").upper()
             if state in ("OK", "DONE", "READY"):
@@ -335,18 +347,24 @@ def get_ads_by_sku(date_from: str, date_to: str, period_name: str) -> pd.DataFra
         batch_size = 10
         total_batches = (len(campaign_ids) - 1) // batch_size + 1
 
-        for i in range(0, len(campaign_ids), batch_size):
-            batch = campaign_ids[i : i + batch_size]
-            batch_num = i // batch_size + 1
+        # Собираем пачки
+        batches = [campaign_ids[i : i + batch_size]
+                    for i in range(0, len(campaign_ids), batch_size)]
+
+        failed_batches = []
+        for batch_num, batch in enumerate(batches, 1):
             print(f"  Пачка {batch_num}/{total_batches}")
 
             uuid, err = _request_report(perf_headers, batch, date_from, date_to)
             if not uuid:
                 print(f"    Ошибка: {err}")
+                failed_batches.append(batch)
                 time.sleep(10)
                 continue
 
             if not _wait_for_report(perf_headers, uuid):
+                print(f"    Таймаут ожидания")
+                failed_batches.append(batch)
                 continue
 
             df, batch_total = _download_and_parse(perf_headers, uuid)
@@ -359,6 +377,25 @@ def get_ads_by_sku(date_from: str, date_to: str, period_name: str) -> pd.DataFra
                 print(f"    расход: {batch_total:,.0f}")
 
             time.sleep(5)
+
+        # Ретрай неудавшихся пачек
+        if failed_batches:
+            print(f"  Повторная попытка: {len(failed_batches)} пачек")
+            time.sleep(30)
+            for batch in failed_batches:
+                uuid, err = _request_report(perf_headers, batch, date_from, date_to)
+                if not uuid:
+                    print(f"    Повтор не удался: {err}")
+                    continue
+                if not _wait_for_report(perf_headers, uuid):
+                    print(f"    Повтор: таймаут")
+                    continue
+                df, batch_total = _download_and_parse(perf_headers, uuid)
+                grand_total += batch_total
+                if df is not None and not df.empty:
+                    all_dfs.append(df)
+                    print(f"    Повтор OK: {len(df)} SKU, расход: {batch_total:,.0f}")
+                time.sleep(5)
 
     # Расход SEARCH_PROMO (не даёт per-SKU, добавляем как «Продвижение в поиске»)
     sp_spend = _get_search_promo_spend(perf_headers, date_from, date_to)

@@ -23,5 +23,8 @@ YM_BUSINESS_ID = 0
 # GigaChat API
 GIGACHAT_CREDENTIALS = ""
 
+# DeepSeek API
+DEEPSEEK_API_KEY = ""
+
 # Путь к файлу себестоимости
 PRICE_FILE = "Прайс 17.02.2026.xlsx"
