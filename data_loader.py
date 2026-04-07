@@ -134,7 +134,11 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
             price_path = None
 
     print("Загрузка прайса...")
-    price = load_price(price_path)
+    if price_path and Path(price_path).exists():
+        price = load_price(price_path)
+    else:
+        print("  Прайс не найден — себестоимость не будет учтена")
+        price = pd.DataFrame(columns=["Артикул", "Цена в рублях"])
     save("price", price, user_id)
 
     # ── Ozon вчера ────────────────────────────────────────────────────
