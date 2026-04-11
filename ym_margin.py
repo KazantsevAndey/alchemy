@@ -137,39 +137,58 @@ def load_services_report(date_from: str, date_to: str, creds=None):
 
     xlsx = pd.ExcelFile(io.BytesIO(content))
 
-    # ── Выручка из листа Размещение ──
+    # ── Выручка из листов с SKU + цена + количество ──
+    # Основной источник — «Размещение», fallback — «Буст» и другие листы
     rev_rows = []
-    razmesh = "Размещение товаров на витрине"
-    if razmesh in xlsx.sheet_names:
-        df_raw = pd.read_excel(xlsx, sheet_name=razmesh, header=None)
+    rev_sheets = ["Размещение товаров на витрине", "Буст продаж, оплата за продажи"]
+    seen_sku_order = set()  # (sku, order) чтобы не дублировать выручку
+
+    for rev_sheet in rev_sheets:
+        if rev_sheet not in xlsx.sheet_names:
+            continue
+        df_raw = pd.read_excel(xlsx, sheet_name=rev_sheet, header=None)
         header_row, sku_col = _find_header_and_sku(df_raw)
-        if header_row is not None:
-            headers = [str(df_raw.iloc[header_row, j]).lower().strip()
-                       for j in range(len(df_raw.columns))]
-            price_col = _find_col(headers, ["ваша цена за шт"])
-            qty_col = _find_col(headers, ["количество, шт"])
-            name_col = _find_col(headers, ["название товара"])
+        if header_row is None:
+            continue
+        hdrs = [str(df_raw.iloc[header_row, j]).lower().strip()
+                for j in range(len(df_raw.columns))]
+        price_col = _find_col(hdrs, ["ваша цена за шт"])
+        qty_col = _find_col(hdrs, ["количество, шт"])
+        name_col = _find_col(hdrs, ["название товара"])
+        order_col = _find_col(hdrs, ["номер заказа"])
 
-            if price_col is not None and qty_col is not None:
-                for idx in range(header_row + 1, len(df_raw)):
-                    sku_val = df_raw.iloc[idx, sku_col]
-                    if pd.isna(sku_val):
-                        continue
-                    sku = str(sku_val).strip()
-                    if not sku or sku == "nan":
-                        continue
+        if price_col is None or qty_col is None:
+            continue
 
-                    p = pd.to_numeric(df_raw.iloc[idx, price_col], errors="coerce")
-                    q = pd.to_numeric(df_raw.iloc[idx, qty_col], errors="coerce")
-                    if pd.isna(p): p = 0.0
-                    if pd.isna(q): q = 0
+        for idx in range(header_row + 1, len(df_raw)):
+            sku_val = df_raw.iloc[idx, sku_col]
+            if pd.isna(sku_val):
+                continue
+            sku = str(sku_val).strip()
+            if not sku or sku == "nan":
+                continue
 
-                    nm = ""
-                    if name_col is not None:
-                        nm_val = df_raw.iloc[idx, name_col]
-                        nm = str(nm_val).strip() if pd.notna(nm_val) else ""
+            # Deduplicate by (sku, order) across sheets
+            order_id = ""
+            if order_col is not None:
+                ov = df_raw.iloc[idx, order_col]
+                order_id = str(ov).strip() if pd.notna(ov) else ""
+            key = (sku, order_id)
+            if key in seen_sku_order:
+                continue
+            seen_sku_order.add(key)
 
-                    rev_rows.append({"sku": sku, "name": nm, "qty": int(q), "revenue": p * q})
+            p = pd.to_numeric(df_raw.iloc[idx, price_col], errors="coerce")
+            q = pd.to_numeric(df_raw.iloc[idx, qty_col], errors="coerce")
+            if pd.isna(p): p = 0.0
+            if pd.isna(q): q = 0
+
+            nm = ""
+            if name_col is not None:
+                nm_val = df_raw.iloc[idx, name_col]
+                nm = str(nm_val).strip() if pd.notna(nm_val) else ""
+
+            rev_rows.append({"sku": sku, "name": nm, "qty": int(q), "revenue": p * q})
 
     if rev_rows:
         rev_df = pd.DataFrame(rev_rows).groupby("sku").agg({
