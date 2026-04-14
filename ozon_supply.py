@@ -67,21 +67,11 @@ WH_TO_CLUSTER = {
     'МИНСК_МПСЦ': 'Беларусь', 'АСТАНА_РФЦ': 'Астана', 'АЛМАТЫ_2_РФЦ': 'Алматы',
 }
 
-CITY_TO_CLUSTER = {
-    'Москва': 'Москва МО', 'Мытищи': 'Москва МО', 'Химки': 'Москва МО', 'Подольск': 'Москва МО',
-    'Балашиха': 'Москва МО', 'Красногорск': 'Москва МО', 'Люберцы': 'Москва МО', 'Одинцово': 'Москва МО',
-    'Санкт-Петербург': 'СПб СЗО', 'Колпино': 'СПб СЗО', 'Всеволожск': 'СПб СЗО', 'Мурино': 'СПб СЗО',
-    'Калининград': 'Калининград', 'Казань': 'Казань', 'Нижний Новгород': 'Казань',
-    'Самара': 'Самара', 'Тольятти': 'Самара', 'Саратов': 'Саратов', 'Волгоград': 'Саратов',
-    'Екатеринбург': 'Екатеринбург', 'Челябинск': 'Екатеринбург', 'Пермь': 'Пермь', 'Уфа': 'Уфа',
-    'Оренбург': 'Оренбург', 'Тюмень': 'Тюмень', 'Сургут': 'Тюмень',
-    'Новосибирск': 'Новосибирск', 'Барнаул': 'Новосибирск', 'Омск': 'Омск',
-    'Красноярск': 'Красноярск', 'Иркутск': 'Красноярск',
-    'Краснодар': 'Краснодар', 'Сочи': 'Краснодар', 'Ростов-на-Дону': 'Ростов',
-    'Воронеж': 'Воронеж', 'Ярославль': 'Ярославль', 'Тверь': 'Тверь',
-    'Хабаровск': 'Дальний Восток', 'Владивосток': 'Дальний Восток',
-    'Минск': 'Беларусь', 'Астана': 'Астана', 'Алматы': 'Алматы',
-    'Ставрополь': 'Невинномысск', 'Пятигорск': 'Невинномысск', 'Махачкала': 'Махачкала',
+
+# Маппинг cluster_from/cluster_to (API) → наши короткие названия
+API_CLUSTER_NORMALIZE = {
+    'Москва, МО и Дальние регионы': 'Москва МО',
+    'Санкт-Петербург и СЗО': 'СПб СЗО',
 }
 
 
@@ -127,7 +117,7 @@ def fetch_postings(days: int = DAYS_SALES, creds=None) -> list:
                 "dir": "DESC",
                 "filter": {"since": date_from, "to": date_to},
                 "limit": 1000, "offset": offset,
-                "with": {"analytics_data": True},
+                "with": {"analytics_data": True, "financial_data": True},
             },
         )
         if resp.status_code != 200:
@@ -166,14 +156,25 @@ def process_stocks(raw_stocks: list) -> pd.DataFrame:
     return df
 
 
+def _normalize_cluster(name: str) -> str:
+    """Normalize API cluster name to our short name."""
+    if not name:
+        return 'Прочее'
+    return API_CLUSTER_NORMALIZE.get(name, name)
+
+
 def process_sales(raw_postings: list) -> pd.DataFrame:
     sales_data = []
     for p in raw_postings:
         analytics = p.get('analytics_data', {}) or {}
+        financial = p.get('financial_data', {}) or {}
         warehouse = analytics.get('warehouse_name', '')
-        city = analytics.get('city', '')
         if 'FRESH' in warehouse:
             continue
+
+        cluster_from = financial.get('cluster_from', '')
+        cluster_to = financial.get('cluster_to', '')
+
         for product in p.get('products', []):
             name = product.get('name', '')
             if 'уцен' in name.lower():
@@ -182,18 +183,28 @@ def process_sales(raw_postings: list) -> pd.DataFrame:
                 'sku': product.get('sku'),
                 'name': name,
                 'warehouse': warehouse,
-                'city': city,
+                'cluster_from_raw': cluster_from,
+                'cluster_to_raw': cluster_to,
                 'quantity': product.get('quantity', 1),
             })
     df = pd.DataFrame(sales_data)
     if df.empty:
         return df
-    df['wh_cluster'] = df['warehouse'].map(WH_TO_CLUSTER).fillna('Прочее')
-    df['dest_cluster'] = (
-        df['city'].map(CITY_TO_CLUSTER)
-        .fillna(df['warehouse'].map(WH_TO_CLUSTER))
-        .fillna('Прочее')
-    )
+
+    # Use API cluster data directly, normalize long names
+    df['wh_cluster'] = df['cluster_from_raw'].apply(_normalize_cluster)
+    df['dest_cluster'] = df['cluster_to_raw'].apply(_normalize_cluster)
+
+    # Fallback to warehouse mapping if API cluster is empty
+    mask_no_from = df['wh_cluster'] == 'Прочее'
+    if mask_no_from.any():
+        df.loc[mask_no_from, 'wh_cluster'] = (
+            df.loc[mask_no_from, 'warehouse'].map(WH_TO_CLUSTER).fillna('Прочее')
+        )
+    mask_no_to = df['dest_cluster'] == 'Прочее'
+    if mask_no_to.any():
+        df.loc[mask_no_to, 'dest_cluster'] = df.loc[mask_no_to, 'wh_cluster']
+
     return df
 
 
