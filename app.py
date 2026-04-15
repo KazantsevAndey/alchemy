@@ -861,12 +861,12 @@ if page == "⚗️ Сводка":
             texttemplate="%{label}<br>%{value:,.0f}",
             hovertemplate="%{label}<br>%{value:,.0f} ₽ (%{percent})<extra></extra>",
             sort=False,
+            domain=dict(x=[0.15, 0.85], y=[0.1, 0.9]),
         ))
         fig.update_layout(
-            height=280,
-            showlegend=True,
-            legend=dict(orientation="v", x=1.02, y=0.5, font=dict(size=10)),
-            margin=dict(l=10, r=10, t=10, b=30),
+            height=380,
+            showlegend=False,
+            margin=dict(l=60, r=60, t=40, b=40),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             annotations=[dict(
