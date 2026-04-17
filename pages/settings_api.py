@@ -9,8 +9,7 @@ from crypto import encrypt, decrypt
 MP_CONFIGS = [
     ("ozon", "Ozon", [
         ("OZON_SELLER_CLIENT_ID", "Client ID"),
-        ("OZON_SELLER_API_KEY", "API Key (основной)"),
-        ("OZON_SELLER_API_KEY_V2", "API Key (расширенный, FBO/остатки)"),
+        ("OZON_SELLER_API_KEY", "API Key"),
         ("OZON_PERF_CLIENT_ID", "Performance Client ID"),
         ("OZON_PERF_CLIENT_SECRET", "Performance Client Secret"),
     ]),
