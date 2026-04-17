@@ -1906,6 +1906,29 @@ elif page == "📦 Остатки":
 elif page == "🚛 Поставки":
     st.title("Планирование поставок")
 
+    # ── Загрузка квантов ──
+    with st.expander("Загрузить файл квантов"):
+        st.caption("Excel с колонками: Артикул, квант, Цена, Название. Текущий файл: quantum_stock.xlsx")
+        _q_file = st.file_uploader("Файл квантов", type=["xlsx", "xls"], key="quantum_upload",
+                                    label_visibility="collapsed")
+        if _q_file:
+            import shutil, io as _io_q
+            _q_bytes = _q_file.getvalue()
+            try:
+                _q_df = pd.read_excel(_io_q.BytesIO(_q_bytes))
+                if "Артикул" not in _q_df.columns or "квант" not in _q_df.columns:
+                    st.error(f"Нужны колонки «Артикул» и «квант». В файле: {', '.join(_q_df.columns.tolist())}")
+                else:
+                    st.success(f"Найдено {len(_q_df)} позиций")
+                    st.dataframe(_q_df.head(10), use_container_width=True, hide_index=True)
+                    if st.button("Сохранить кванты", type="primary", key="save_quants"):
+                        with open("quantum_stock.xlsx", "wb") as f:
+                            f.write(_q_bytes)
+                        st.success("Файл квантов обновлён")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка чтения файла: {e}")
+
     mp_choice = st.radio("Маркетплейс", ["Ozon", "WB", "Yandex Market"], horizontal=True, key="supply_mp")
 
     def _cluster_status(days):
