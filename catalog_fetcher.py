@@ -6,7 +6,6 @@ Returns unified list of dicts with keys:
 """
 
 import requests
-import time
 
 
 # ── Ozon ─────────────────────────────────────────────────────────────
@@ -32,7 +31,7 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
         body = {"filter": {"visibility": "ALL"}, "limit": 1000}
         if last_id:
             body["last_id"] = last_id
-        resp = requests.post(f"{base}/v2/product/list", headers=headers, json=body)
+        resp = requests.post(f"{base}/v2/product/list", headers=headers, json=body, timeout=15)
         if resp.status_code != 200:
             print(f"  Ozon /v2/product/list ошибка: {resp.status_code}")
             break
@@ -44,7 +43,6 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
         last_id = data.get("last_id", "")
         if not last_id or len(items) < 1000:
             break
-        time.sleep(0.3)
 
     if not product_ids:
         return []
@@ -58,6 +56,7 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
             f"{base}/v3/product/info/list",
             headers=headers,
             json={"product_id": batch},
+            timeout=15,
         )
         if resp.status_code != 200:
             print(f"  Ozon info ошибка: {resp.status_code}")
@@ -80,7 +79,6 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
                 "ozon_product_id": it.get("id") or it.get("product_id"),
                 "ozon_sku": ozon_sku,
             })
-        time.sleep(0.3)
 
     print(f"  Ozon: {len(result)} товаров загружено")
     return result
@@ -104,7 +102,7 @@ def fetch_wb_catalog(creds: dict) -> list[dict]:
     cursor = {"limit": 100}
     while True:
         body = {"settings": {"cursor": cursor, "filter": {"withPhoto": -1}}}
-        resp = requests.post(f"{base}/content/v2/get/cards/list", headers=headers, json=body)
+        resp = requests.post(f"{base}/content/v2/get/cards/list", headers=headers, json=body, timeout=15)
         if resp.status_code != 200:
             print(f"  WB cards ошибка: {resp.status_code} — {resp.text[:200]}")
             break
@@ -129,7 +127,6 @@ def fetch_wb_catalog(creds: dict) -> list[dict]:
             "updatedAt": cursor_data.get("updatedAt", ""),
             "nmID": cursor_data.get("nmID", 0),
         }
-        time.sleep(0.7)
 
     print(f"  WB: {len(result)} товаров загружено")
     return result
@@ -158,7 +155,7 @@ def fetch_ym_catalog(creds: dict) -> list[dict]:
             body["page_token"] = page_token
         resp = requests.post(
             f"{base}/businesses/{business_id}/offer-mappings",
-            headers=headers, json=body,
+            headers=headers, json=body, timeout=15,
         )
         if resp.status_code != 200:
             print(f"  YM offer-mappings ошибка: {resp.status_code} — {resp.text[:200]}")
@@ -182,7 +179,6 @@ def fetch_ym_catalog(creds: dict) -> list[dict]:
         page_token = paging.get("nextPageToken")
         if not page_token:
             break
-        time.sleep(0.5)
 
     print(f"  YM: {len(result)} товаров загружено")
     return result
