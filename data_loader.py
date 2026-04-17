@@ -126,20 +126,31 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
     dm = month_start.strftime("%Y-%m-%d")
     day_before = (yesterday - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Прайс
-    if price_path is None:
-        try:
-            from config import PRICE_FILE
-            price_path = PRICE_FILE
-        except ImportError:
-            price_path = None
-
+    # Прайс: приоритет — каталог из БД, fallback — Excel файл
     print("Загрузка прайса...")
-    if price_path and Path(price_path).exists():
-        price = load_price(price_path)
-    else:
-        print("  Прайс не найден — себестоимость не будет учтена")
-        price = pd.DataFrame(columns=["Артикул", "Цена в рублях"])
+    price = None
+
+    if user_id is not None:
+        from db import build_price_df_from_catalog, get_catalog_count
+        cat_count = get_catalog_count(user_id)
+        if cat_count > 0:
+            price = build_price_df_from_catalog(user_id)
+            print(f"  Прайс из каталога БД: {len(price)} товаров")
+
+    if price is None or price.empty:
+        if price_path is None:
+            try:
+                from config import PRICE_FILE
+                price_path = PRICE_FILE
+            except ImportError:
+                price_path = None
+
+        if price_path and Path(price_path).exists():
+            price = load_price(price_path)
+        else:
+            print("  Прайс не найден — себестоимость не будет учтена")
+            price = pd.DataFrame(columns=["Артикул", "Ozon SKU ID", "Наименование", "Цена в рублях"])
+
     save("price", price, user_id)
 
     # ── Ozon ─────────────────────────────────────────────────────────

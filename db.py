@@ -256,6 +256,33 @@ def get_cost_map(user_id: int) -> dict:
     return {r["article"]: r["cost_price"] for r in rows}
 
 
+def build_price_df_from_catalog(user_id: int):
+    """Build a price DataFrame from product_catalog matching the Excel format.
+
+    Returns DataFrame with columns: Артикул, Ozon SKU ID, Наименование, Цена в рублях
+    This matches the format expected by ozon_margin, wb_margin, ym_margin.
+    """
+    import pandas as pd
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT article, name, ozon_sku, cost_price FROM product_catalog "
+        "WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return pd.DataFrame(columns=["Артикул", "Ozon SKU ID", "Наименование", "Цена в рублях"])
+    data = []
+    for r in rows:
+        data.append({
+            "Артикул": r["article"],
+            "Ozon SKU ID": r["ozon_sku"],
+            "Наименование": r["name"] or "",
+            "Цена в рублях": r["cost_price"] or 0,
+        })
+    return pd.DataFrame(data)
+
+
 def get_catalog_count(user_id: int) -> int:
     conn = get_conn()
     row = conn.execute(
