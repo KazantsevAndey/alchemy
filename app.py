@@ -152,11 +152,52 @@ def _sc(val):
 
 import json as _json
 
+_OZ_REGULATED_KEYWORDS = (
+    "оплата за клик", "продвижение", "звёздные товары", "ускоренный сбор отзывов",
+    "бонусы продавца", "подписка premium", "баллы за отзывы", "маркетинговые услуги",
+    "внешнее продвижение",
+)
+_OZ_FIXED_KEYWORDS = ("эквайринг", "комиссия")
+
+def _classify_oz_expense(name):
+    n = name.lower()
+    if any(k in n for k in _OZ_REGULATED_KEYWORDS):
+        return "regulated"
+    if any(k in n for k in _OZ_FIXED_KEYWORDS):
+        return "fixed"
+    return "semi_regulated"
+
+_WB_GROUP_BY_LABEL = {
+    "Лояльность": "regulated",
+    "Баллы лояльности": "regulated",
+    "Логистика": "semi_regulated",
+    "Хранение": "semi_regulated",
+    "Обратная логистика": "semi_regulated",
+    "Удержания": "semi_regulated",
+    "Штрафы": "semi_regulated",
+}
+
+def _group_expenses(items, classifier):
+    """Сгруппировать словарь {статья: сумма} в три группы по управляемости."""
+    groups = {
+        "regulated": {"total": 0.0, "items": {}},
+        "semi_regulated": {"total": 0.0, "items": {}},
+        "fixed": {"total": 0.0, "items": {}},
+    }
+    for name, amount in items.items():
+        grp = classifier(name)
+        groups[grp]["items"][name] = amount
+        groups[grp]["total"] += amount
+    for g in groups.values():
+        g["total"] = round(g["total"], 0)
+    return groups
+
+
 def _oz_expenses(nach_key):
     """Extract Ozon expenses dict from nach cache."""
     nach = C(nach_key)
     if nach is None or nach.empty:
-        return {"total": 0, "items": {}}
+        return {"total": 0, "items": {}, "groups": _group_expenses({}, _classify_oz_expense)}
     neg = nach[
         (nach["operation_type_name"] != "Общая сумма") &
         (nach["operation_type_name"] != "Доставка покупателю") &
@@ -164,17 +205,19 @@ def _oz_expenses(nach_key):
         (nach["amount"] < 0)
     ].copy()
     if neg.empty:
-        return {"total": 0, "items": {}}
+        return {"total": 0, "items": {}, "groups": _group_expenses({}, _classify_oz_expense)}
     neg["abs_amount"] = neg["amount"].abs()
     agg = neg.groupby("operation_type_name")["abs_amount"].sum().sort_values(ascending=False)
+    items = {k: round(float(v), 0) for k, v in agg.items()}
     return {"total": round(float(agg.sum()), 0),
-            "items": {k: round(float(v), 0) for k, v in agg.items()}}
+            "items": items,
+            "groups": _group_expenses(items, _classify_oz_expense)}
 
 def _wb_expenses(df_key, sum_key):
     """Extract WB expenses dict from df cache."""
     wb_df = C(df_key)
     if wb_df is None or wb_df.empty:
-        return {"total": 0, "items": {}}
+        return {"total": 0, "items": {}, "groups": _group_expenses({}, lambda n: _WB_GROUP_BY_LABEL.get(n, "semi_regulated"))}
     expenses = {}
     for col, lbl in [("delivery_rub", "Логистика"), ("storage_fee", "Хранение"),
                      ("deduction", "Удержания"), ("penalty", "Штрафы"),
@@ -189,7 +232,9 @@ def _wb_expenses(df_key, sum_key):
             expenses["Лояльность"] = round(float(wb_sum["loyal_cost"]), 0)
         if wb_sum.get("loyal_balls", 0) > 0:
             expenses["Баллы лояльности"] = round(float(wb_sum["loyal_balls"]), 0)
-    return {"total": round(sum(expenses.values()), 0), "items": expenses}
+    return {"total": round(sum(expenses.values()), 0),
+            "items": expenses,
+            "groups": _group_expenses(expenses, lambda n: _WB_GROUP_BY_LABEL.get(n, "semi_regulated"))}
 
 def _ym_ai_summary(d):
     """Extract YM summary for AI signal from cached data."""
@@ -277,31 +322,70 @@ def _build_full_json():
         "low_margin_sku": low_margin,
     }
 
+def _enrich_expenses_with_pct(exp, revenue):
+    """Добавить pct_of_revenue в total и каждую группу, чтобы модель не считала сама."""
+    if not exp or not revenue:
+        return exp
+    out = dict(exp)
+    out["total_pct_of_revenue"] = round(out.get("total", 0) / revenue * 100, 1)
+    if "groups" in out:
+        new_groups = {}
+        for k, g in out["groups"].items():
+            ng = dict(g)
+            ng["pct_of_revenue"] = round(g.get("total", 0) / revenue * 100, 1)
+            new_groups[k] = ng
+        out["groups"] = new_groups
+    return out
+
+
+def _build_comparison(y, m):
+    """Сравнение вчера/месяц с явным направлением — чтобы модель не путала."""
+    def _dir(yv, mv, tol=0.05):
+        if abs(yv - mv) <= tol:
+            return "equal"
+        return "yesterday_higher" if yv > mv else "yesterday_lower"
+    cmp = {}
+    if "margin_pct" in y and "margin_pct" in m:
+        cmp["margin_pct"] = {"yesterday": y["margin_pct"], "month": m["margin_pct"],
+                             "direction": _dir(y["margin_pct"], m["margin_pct"])}
+    if "drr_pct" in y and "drr_pct" in m:
+        cmp["drr_pct"] = {"yesterday": y["drr_pct"], "month": m["drr_pct"],
+                          "direction": _dir(y["drr_pct"], m["drr_pct"])}
+    return cmp
+
+
 def _build_mp_json(mp):
     """Build single-marketplace JSON for AI analysis (Ozon/WB pages)."""
     full = _build_full_json()
-    if mp == "Ozon":
-        return {
-            "marketplace": "Ozon",
-            "period": full["period"],
-            "summary": {"yesterday": full["summary"]["yesterday"]["ozon"],
-                         "month": full["summary"]["month"]["ozon"]},
-            "expenses": {"yesterday": full["expenses_yesterday"]["ozon"],
-                          "month": full["expenses_month"]["ozon"]},
-            "top_sku": full["top_sku_month"]["ozon"],
-            "low_margin_sku": [s for s in full["low_margin_sku"] if s["marketplace"] == "Ozon"],
-        }
-    else:
-        return {
-            "marketplace": "Wildberries",
-            "period": full["period"],
-            "summary": {"yesterday": full["summary"]["yesterday"]["wb"],
-                         "month": full["summary"]["month"]["wb"]},
-            "expenses": {"yesterday": full["expenses_yesterday"]["wb"],
-                          "month": full["expenses_month"]["wb"]},
-            "top_sku": full["top_sku_month"]["wb"],
-            "low_margin_sku": [s for s in full["low_margin_sku"] if s["marketplace"] == "WB"],
-        }
+    key = "ozon" if mp == "Ozon" else "wb"
+
+    sum_y = dict(full["summary"]["yesterday"][key])
+    sum_m = dict(full["summary"]["month"][key])
+
+    exp_y = full["expenses_yesterday"][key]
+    exp_m = full["expenses_month"][key]
+    rev_y = sum_y.get("revenue", 0)
+    rev_m = sum_m.get("revenue", 0)
+
+    # ДРР % за вчера: для Ozon — из «Оплата за клик» в расходах
+    if mp == "Ozon" and rev_y:
+        drr_y_total = exp_y.get("items", {}).get("Оплата за клик", 0)
+        if drr_y_total:
+            sum_y["drr_total"] = round(float(drr_y_total), 0)
+            sum_y["drr_pct"] = round(drr_y_total / rev_y * 100, 1)
+
+    exp_y_enriched = _enrich_expenses_with_pct(exp_y, rev_y)
+    exp_m_enriched = _enrich_expenses_with_pct(exp_m, rev_m)
+
+    return {
+        "marketplace": "Ozon" if mp == "Ozon" else "Wildberries",
+        "period": full["period"],
+        "summary": {"yesterday": sum_y, "month": sum_m},
+        "comparison": _build_comparison(sum_y, sum_m),
+        "expenses": {"yesterday": exp_y_enriched, "month": exp_m_enriched},
+        "top_sku": full["top_sku_month"][key],
+        "low_margin_sku": [s for s in full["low_margin_sku"] if s["marketplace"] == ("Ozon" if mp == "Ozon" else "WB")],
+    }
 
 def _build_summary_text(full_json):
     """Build flat text summary for DeepSeek from full_json metrics."""
@@ -378,7 +462,7 @@ def _deepseek_call(system_prompt, user_prompt):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=400,
+        max_tokens=1200,
         temperature=0.3,
     )
     return resp.choices[0].message.content
@@ -418,34 +502,99 @@ red = обнаружено заметное ухудшение, нужна ср�
 
 _ANALYSIS_SYSTEM = """Ты — AI-аналитик финансовых показателей e-commerce бизнеса на маркетплейсах.
 
-Задача: проанализировать метрики одного маркетплейса и дать короткие полезные выводы для руководителя.
+Задача: проанализировать метрики маркетплейса и дать короткие полезные выводы для руководителя.
 
 Правила:
-- Не пересказывай все цифры, пользователь их видит в таблицах
-- Ищи отклонения, риски и приоритеты
-- Не выдумывай причины. Если данных мало, пиши 'вероятно' или 'требует проверки'
-- Приоритизируй по влиянию на прибыль
-- Не давай абстрактных советов. Указывай конкретные статьи расходов и SKU
-- Пиши коротко, без воды и канцелярита
-- Не хвали отчёт и пользователя
-- Не добавляй вводные фразы ради объёма
+- Не пересказывай все цифры — пользователь их видит в таблицах
+- Разделяй анализ на два периода: с начала месяца и за вчера
+- Группировка расходов уже готова в expenses.month.groups и expenses.yesterday.groups:
+  • regulated (реклама, акции, скидки, подписки) — на них можно влиять
+  • semi_regulated (логистика, хранение, возвраты, штрафы, утилизация) — влияние через ассортимент/поставки/качество
+  • fixed (эквайринг, комиссия площадки) — принимаем как есть
+- Используй эти группы как есть, не перегруппируй сам
+- Не выдумывай причины. Если данных мало — пиши "вероятно" или "требует проверки"
+- Указывай конкретные SKU и суммы где возможно
+- Пиши коротко, без воды
+- Не хвали и не добавляй вводные фразы ради объёма
+- ЗАПРЕЩЕНО ссылаться на рыночные средние, отраслевые нормы, целевые бенчмарки и "обычно". Используй ТОЛЬКО цифры из JSON.
+- ЗАПРЕЩЕНО считать проценты самому — все нужные pct_of_revenue, margin_pct, drr_pct и т.п. уже посчитаны в JSON. Бери готовые.
+- Перед сравнением "выше/ниже" сверь оба числа: если A < B, пиши "ниже B", не "выше". Используй блок comparison с готовым полем direction.
+- ЗАПРЕЩЕНО предлагать конкретные числовые цели, которых нет в JSON. Не пиши "снизить ДРР до 15%", "довести маржу до 30%" и т.п. Пиши просто "снизить", "пересмотреть", "проверить".
 
-Ответь строго по структуре:
+Формат:
+- Каждый пункт с дефиса "- "
+- Между пунктами одной секции — без пустых строк
+- Между секциями — одна пустая строка
 
-КРАТКИЙ ВЫВОД
-- (1-2 пункта, общая оценка)
+Структура ответа:
 
-ЧТО НАСТОРАЖИВАЕТ
-- (1-3 пункта, конкретные проблемы)
+ВЧЕРА
+- (2-3 пункта: выручка, маржа, аномалии если есть)
 
-КЛЮЧЕВЫЕ ДРАЙВЕРЫ РАСХОДОВ
-- (2-3 пункта, какие статьи расходов доминируют)
+С НАЧАЛА МЕСЯЦА
+- (2-3 пункта: динамика, тренд маржи, сравнение с планом если есть)
 
-КОНКРЕТНЫЕ ДЕЙСТВИЯ
-1. (3-5 действий на эту неделю, конкретные)
+СТРУКТУРА РАСХОДОВ
+- Регулируемые: (реклама, ДРР — сколько % от выручки, норма или много)
+- Условно-регулируемые: (логистика, хранение — есть ли перекос)
+- Нерегулируемые: (эквайринг, комиссия — просто констатация)
 
-НЕДОСТАЮЩИЕ ДАННЫЕ
-- (что нужно для точного вывода)"""
+ПРОБЛЕМНЫЕ МЕСТА
+- (2-4 пункта: конкретные SKU с низкой маржой, перерасход рекламы, затоваривание)
+
+НА ЧТО ОБРАТИТЬ ВНИМАНИЕ
+- (2-3 пункта: приоритетные действия на ближайшие дни)"""
+
+
+def _is_section_header(ln):
+    s = ln.strip()
+    if not s:
+        return False
+    if s.startswith(("-", "•", "*")) or (len(s) > 1 and s[0].isdigit() and s[1] in ".)"):
+        return False
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    return all(c.isupper() for c in letters)
+
+
+def _normalize_ai_text(text):
+    """Убрать пустые строки между пунктами; одна пустая строка перед заголовком секции."""
+    if not text:
+        return text
+    raw = [ln.rstrip() for ln in str(text).splitlines()]
+    non_empty = [ln for ln in raw if ln.strip()]
+    if not non_empty:
+        return ""
+    out = []
+    for i, ln in enumerate(non_empty):
+        if i > 0 and _is_section_header(ln):
+            out.append("")
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def _ai_text_to_html(text):
+    """Готовый HTML без markdown-парсинга: каждая строка отдельным <div>,
+    заголовки секций жирные с отступом, пустых параграфов не возникает."""
+    import html as _html
+    norm = _normalize_ai_text(text)
+    if not norm:
+        return ""
+    parts = []
+    for ln in norm.split("\n"):
+        s = ln.strip()
+        if not s:
+            parts.append('<div style="height:6px"></div>')
+            continue
+        if _is_section_header(ln):
+            parts.append(
+                f'<div style="font-weight:700;margin-top:8px;color:#0f172a">'
+                f'{_html.escape(s)}</div>'
+            )
+        else:
+            parts.append(f'<div>{_html.escape(s)}</div>')
+    return "".join(parts)
 
 def _show_signal_card(answer):
     """Parse signal JSON and show colored card."""
@@ -738,8 +887,8 @@ if page == "⚗️ Сводка":
     _summary_row("Вчера", oz_y, wb_y, "y")
     _summary_row("Месяц", oz_m, wb_m, "m")
 
-    # ── AI-сигнал ──
-    if st.button("🤖 AI-сигнал", key="main_ai_signal", type="secondary"):
+    # ── AI ──
+    if st.button("🤖 AI", key="main_ai_signal", type="secondary"):
         full_json = _build_full_json()
         summary_text = _build_summary_text(full_json)
         margin_month = full_json["summary"]["month"]["total"]["margin_pct"]
@@ -791,7 +940,7 @@ if page == "⚗️ Сводка":
                     f'<div style="font-size:18px;font-weight:700;color:{_sig_text_c};margin-bottom:8px">'
                     f'{_sig_icon} Маржинальность {margin_month:.1f}%</div>'
                     f'<div style="font-size:14px;color:#1e293b;line-height:1.7;white-space:pre-wrap">'
-                    f'{answer}</div></div>', unsafe_allow_html=True)
+                    f'{_normalize_ai_text(answer)}</div></div>', unsafe_allow_html=True)
         else:
             st.warning("AI временно недоступен")
             fb = _show_auto_fallback(full_json)
@@ -1290,16 +1439,21 @@ elif page == "🔵 Ozon":
         answer = None
         with st.spinner("Анализирую..."):
             try:
-                answer = _giga_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
+                answer = _deepseek_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
             except Exception:
                 pass
+            if not answer:
+                try:
+                    answer = _giga_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
+                except Exception:
+                    pass
         if answer:
             st.markdown(
                 f'<div style="border:1px solid #bfdbfe;border-radius:14px;padding:20px 24px;'
                 f'background:linear-gradient(135deg,#eff6ff,#f0f9ff);'
                 f'box-shadow:0 1px 3px rgba(0,0,0,0.04);margin-top:12px">'
                 f'<div style="font-size:13px;font-weight:700;color:#2563eb;margin-bottom:10px">🤖 AI-анализ</div>'
-                f'<div style="font-size:14px;color:#1e293b;line-height:1.7;white-space:pre-wrap">{answer}</div>'
+                f'<div style="font-size:14px;color:#1e293b;line-height:1.6">{_ai_text_to_html(answer)}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -1581,16 +1735,21 @@ elif page == "🟣 WB":
         answer = None
         with st.spinner("Анализирую..."):
             try:
-                answer = _giga_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
+                answer = _deepseek_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
             except Exception:
                 pass
+            if not answer:
+                try:
+                    answer = _giga_call(_ANALYSIS_SYSTEM, _json.dumps(mp_json, ensure_ascii=False))
+                except Exception:
+                    pass
         if answer:
             st.markdown(
                 f'<div style="border:1px solid #ddd6fe;border-radius:14px;padding:20px 24px;'
                 f'background:linear-gradient(135deg,#f5f3ff,#faf5ff);'
                 f'box-shadow:0 1px 3px rgba(0,0,0,0.04);margin-top:12px">'
                 f'<div style="font-size:13px;font-weight:700;color:#7c3aed;margin-bottom:10px">🤖 AI-анализ</div>'
-                f'<div style="font-size:14px;color:#1e293b;line-height:1.7;white-space:pre-wrap">{answer}</div>'
+                f'<div style="font-size:14px;color:#1e293b;line-height:1.6">{_ai_text_to_html(answer)}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -1961,7 +2120,8 @@ elif page == "🚛 Поставки":
         if wb_calc_btn:
             with st.spinner("Загрузка данных с WB и расчёт..."):
                 from wb_supply import compute_wb_supply_data
-                wb_result = compute_wb_supply_data(days_plan=wb_depth)
+                _qf = f"data/user_{_USER_ID}/quantum_stock.xlsx"
+                wb_result = compute_wb_supply_data(days_plan=wb_depth, creds=get_user_credentials(_USER_ID), quantum_file=_qf)
                 st.session_state["wb_supply_result"] = wb_result
                 st.session_state["wb_supply_depth_used"] = wb_depth
 
@@ -2074,7 +2234,8 @@ elif page == "🚛 Поставки":
                            else "Загрузка данных из API Яндекс Маркет и расчёт...")
             with st.spinner(spinner_msg):
                 from ym_supply import compute_ym_supply_data
-                ym_result = compute_ym_supply_data(days_plan=ym_depth, lk_file_bytes=lk_bytes)
+                _qf = f"data/user_{_USER_ID}/quantum_stock.xlsx"
+                ym_result = compute_ym_supply_data(days_plan=ym_depth, lk_file_bytes=lk_bytes, creds=get_user_credentials(_USER_ID), quantum_file=_qf)
                 st.session_state["ym_supply_result"] = ym_result
                 st.session_state["ym_supply_depth_used"] = ym_depth
 
@@ -2179,7 +2340,8 @@ elif page == "🚛 Поставки":
     if calc_btn:
         with st.spinner("Загрузка данных с Ozon и расчёт..."):
             from ozon_supply import compute_supply_data
-            result = compute_supply_data(days_plan=days_depth)
+            _qf = f"data/user_{_USER_ID}/quantum_stock.xlsx"
+            result = compute_supply_data(days_plan=days_depth, creds=get_user_credentials(_USER_ID), quantum_file=_qf, user_id=_USER_ID)
             st.session_state["supply_result"] = result
             st.session_state["supply_depth_used"] = days_depth
 
@@ -2374,7 +2536,8 @@ elif page == "🚛 Поставки":
     if st.button("Сформировать план (Excel)", key="supply_download"):
         with st.spinner("Формируется Excel..."):
             from ozon_supply import build_supply_plan
-            buf = build_supply_plan(days_plan=depth_used)
+            _qf = f"data/user_{_USER_ID}/quantum_stock.xlsx"
+            buf = build_supply_plan(days_plan=depth_used, creds=get_user_credentials(_USER_ID), quantum_file=_qf, user_id=_USER_ID)
             st.session_state["ozon_supply_excel"] = buf
     if st.session_state.get("ozon_supply_excel"):
         from datetime import datetime as _dt_dl

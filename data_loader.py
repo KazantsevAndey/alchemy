@@ -188,10 +188,45 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
             print("\n" + "=" * 60)
             print("WB ВЧЕРА")
             print("=" * 60)
-            wb_all = wb_prepare_df(wb_load_report(dm, dy, creds=creds))
+
+            # Отчёт за месяц: пытаемся свежий, иначе фоллбэк на кэш
+            wb_used_cache = False
+            try:
+                wb_all = wb_prepare_df(wb_load_report(dm, dy, creds=creds))
+            except Exception as e:
+                print(f"  load_report упал: {e}")
+                cached = load("wb_df_m", user_id)
+                if cached is None or cached.empty:
+                    raise RuntimeError("отчёт WB недоступен и кэш wb_df_m пуст") from e
+                print(f"  → используем кэш wb_df_m от прошлого refresh ({len(cached)} строк)")
+                wb_all = cached
+                wb_used_cache = True
+
             yesterday_date = yesterday.date()
+            month_start_date = month_start.date()
+            if wb_used_cache and not wb_all.empty:
+                latest_in_cache = wb_all["sale_date"].max()
+                if latest_in_cache < yesterday_date:
+                    print(f"  → 'вчера' заменено на последнюю дату в кэше: {latest_in_cache}")
+                    yesterday_date = latest_in_cache
+                    # Если новый месяц ещё не наступил в кэше — берём месяц,
+                    # в котором есть последние данные
+                    if month_start_date > latest_in_cache:
+                        month_start_date = latest_in_cache.replace(day=1)
+                        print(f"  → 'месяц' заменён на {month_start_date}–{latest_in_cache}")
             wb_df_y = wb_all[wb_all["sale_date"] == yesterday_date].copy()
-            wb_ads_y = get_wb_ads(day_before, day_before, "за вчера", creds)
+            wb_all = wb_all[
+                (wb_all["sale_date"] >= month_start_date)
+                & (wb_all["sale_date"] <= yesterday_date)
+            ].copy()
+
+            # Реклама за вчера: best-effort
+            try:
+                wb_ads_y = get_wb_ads(day_before, day_before, "за вчера", creds)
+            except Exception as e:
+                print(f"  get_wb_ads(вчера) упал: {e} — adv_sum=0")
+                wb_ads_y = pd.DataFrame(columns=["nm_id", "adv_sum"])
+
             wb_sum_y = wb_calc_summary(wb_df_y, "Вчера")
             wb_agg_y = wb_calc_unit_economics(wb_df_y, price, wb_ads_y)
             for k, v in [("wb_df_y", wb_df_y), ("wb_sum_y", wb_sum_y), ("wb_agg_y", wb_agg_y)]:
@@ -201,7 +236,14 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
             print("WB МЕСЯЦ")
             print("=" * 60)
             wb_df_m = wb_all
-            wb_ads_m = get_wb_ads(dm, day_before, "за месяц", creds)
+
+            # Реклама за месяц: best-effort
+            try:
+                wb_ads_m = get_wb_ads(dm, day_before, "за месяц", creds)
+            except Exception as e:
+                print(f"  get_wb_ads(месяц) упал: {e} — adv_sum=0")
+                wb_ads_m = pd.DataFrame(columns=["nm_id", "adv_sum"])
+
             wb_sum_m = wb_calc_summary(wb_df_m, "Месяц")
             wb_agg_m = wb_calc_unit_economics(wb_df_m, price, wb_ads_m)
             for k, v in [("wb_df_m", wb_df_m), ("wb_sum_m", wb_sum_m), ("wb_agg_m", wb_agg_m)]:

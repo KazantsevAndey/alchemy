@@ -23,6 +23,26 @@ DAYS_SALES = 30   # за сколько дней берём продажи
 DAYS_PLAN  = 60   # на сколько дней планируем запас
 QUANTUM_FILE = "quantum_stock.xlsx"
 
+LIQUIDITY_DEFICIT_DAYS = 14   # дней запаса меньше — Дефицит
+LIQUIDITY_OVERSTOCK_DAYS = 60  # дней запаса больше — Избыточный
+
+
+def _liquidity_label(days, sold=None):
+    """Метка ликвидности по дням запаса (а-ля Ozon)."""
+    if sold is not None and sold == 0:
+        return 'Нет продаж'
+    if days is None:
+        return ''
+    try:
+        d = float(days)
+    except (TypeError, ValueError):
+        return ''
+    if d < LIQUIDITY_DEFICIT_DAYS:
+        return 'Дефицит'
+    if d > LIQUIDITY_OVERSTOCK_DAYS:
+        return 'Избыточный'
+    return 'Норма'
+
 
 def _get_creds(creds):
     if creds is not None:
@@ -40,7 +60,7 @@ def _get_creds(creds):
 def _ozon_headers(creds):
     c = _get_creds(creds)
     return {
-        "Client-Id": c["OZON_SELLER_CLIENT_ID"],
+        "Client-Id": c.get("OZON_SELLER_CLIENT_ID", ""),
         "Api-Key": c.get("OZON_SELLER_API_KEY_V2", c.get("OZON_SELLER_API_KEY", "")),
         "Content-Type": "application/json",
     }
@@ -64,7 +84,7 @@ WH_TO_CLUSTER = {
     'ПЕРМЬ_РФЦ': 'Пермь', 'УФА_РФЦ': 'Уфа', 'ОРЕНБУРГ_РФЦ': 'Оренбург', 'ТЮМЕНЬ_РФЦ': 'Тюмень',
     'Новосибирск_РФЦ_НОВЫЙ': 'Новосибирск', 'НОВОСИБИРСК_РФЦ_НОВЫЙ': 'Новосибирск',
     'ОМСК_РФЦ': 'Омск', 'КРАСНОЯРСК_МРФЦ': 'Красноярск', 'ХАБАРОВСК_2_РФЦ': 'Дальний Восток',
-    'МИНСК_МПСЦ': 'Беларусь', 'АСТАНА_РФЦ': 'Астана', 'АЛМАТЫ_2_РФЦ': 'Алматы',
+    'МИНСК_МПСЦ': 'Беларусь', 'АСТАНА_РФЦ': 'Казахстан', 'АЛМАТЫ_2_РФЦ': 'Казахстан',
 }
 
 
@@ -72,6 +92,8 @@ WH_TO_CLUSTER = {
 API_CLUSTER_NORMALIZE = {
     'Москва, МО и Дальние регионы': 'Москва МО',
     'Санкт-Петербург и СЗО': 'СПб СЗО',
+    'Астана': 'Казахстан',
+    'Алматы': 'Казахстан',
 }
 
 
@@ -140,6 +162,10 @@ def fetch_postings(days: int = DAYS_SALES, creds=None) -> list:
 # ── Загрузка файла квантов ───────────────────────────────────────────────
 
 def load_quants(path: str = QUANTUM_FILE) -> pd.DataFrame:
+    from pathlib import Path
+    if not Path(path).exists():
+        print(f"  Файл квантов не найден: {path} — используются значения по умолчанию")
+        return pd.DataFrame(columns=['SKU', 'квант', 'Цена'])
     df = pd.read_excel(path)
     df['SKU'] = df['SKU'].astype(str).str.replace('.0', '', regex=False)
     print(f"  Квантов: {len(df)}")
@@ -149,7 +175,14 @@ def load_quants(path: str = QUANTUM_FILE) -> pd.DataFrame:
 # ── Обработка данных ─────────────────────────────────────────────────────
 
 def process_stocks(raw_stocks: list) -> pd.DataFrame:
+    if not raw_stocks:
+        return pd.DataFrame(columns=['sku', 'item_name', 'warehouse_name',
+                                     'free_to_sell_amount', 'promised_amount', 'cluster'])
     df = pd.DataFrame(raw_stocks)
+    if 'warehouse_name' not in df.columns:
+        print(f"  Неожиданные колонки остатков: {list(df.columns)}")
+        return pd.DataFrame(columns=['sku', 'item_name', 'warehouse_name',
+                                     'free_to_sell_amount', 'promised_amount', 'cluster'])
     df = df[~df['warehouse_name'].str.contains('FRESH', case=False, na=False)]
     df = df[~df['item_name'].str.lower().str.contains('уцен', na=False)]
     df['cluster'] = df['warehouse_name'].map(WH_TO_CLUSTER).fillna('Прочее')
@@ -175,6 +208,13 @@ def process_sales(raw_postings: list) -> pd.DataFrame:
         cluster_from = financial.get('cluster_from', '')
         cluster_to = financial.get('cluster_to', '')
 
+        # Дата создания отправления — для метрики "дней без продаж"
+        sale_dt_raw = p.get('in_process_at') or p.get('created_at') or ''
+        try:
+            sale_date = pd.to_datetime(sale_dt_raw).date() if sale_dt_raw else None
+        except Exception:
+            sale_date = None
+
         for product in p.get('products', []):
             name = product.get('name', '')
             if 'уцен' in name.lower():
@@ -186,6 +226,7 @@ def process_sales(raw_postings: list) -> pd.DataFrame:
                 'cluster_from_raw': cluster_from,
                 'cluster_to_raw': cluster_to,
                 'quantity': product.get('quantity', 1),
+                'sale_date': sale_date,
             })
     df = pd.DataFrame(sales_data)
     if df.empty:
@@ -246,10 +287,10 @@ def get_stock_turnover(
         'warehouse_name': 'warehouse',
     }, inplace=True)
 
-    # Продажи по складам (wh_cluster)
+    # Продажи по кластерам (dest_cluster — куда реальный спрос)
     if not df_sales.empty:
         sales_wh = (
-            df_sales.groupby(['sku', 'wh_cluster'])['quantity']
+            df_sales.groupby(['sku', 'dest_cluster'])['quantity']
             .sum().reset_index()
         )
         sales_wh.columns = ['sku', 'cluster', 'sold']
@@ -287,6 +328,8 @@ def build_supply_plan(
     days_plan: int = DAYS_PLAN,
     quantum_file: str = QUANTUM_FILE,
     output: str | None = None,
+    creds=None,
+    user_id=None,
 ) -> str:
     """Строит план поставок и сохраняет Excel. Возвращает имя файла."""
 
@@ -297,19 +340,19 @@ def build_supply_plan(
     print("Загрузка квантов...")
     df_q = load_quants(quantum_file)
     quants = dict(zip(df_q['SKU'], df_q['квант']))
-    barcodes = dict(zip(df_q['SKU'], df_q['штрихкод']))
-    prices = dict(zip(df_q['SKU'], df_q['Цена']))
-    stock_italco = dict(zip(df_q['SKU'], df_q['сток италко']))
-    name_1c = dict(zip(df_q['SKU'], df_q['Наименование 1С']))
+    barcodes = dict(zip(df_q['SKU'], df_q.get('штрихкод', pd.Series(dtype=str))))
+    prices = dict(zip(df_q['SKU'], df_q.get('Цена', pd.Series(dtype=float))))
+    stock_italco = dict(zip(df_q['SKU'], df_q.get('сток италко', pd.Series(dtype=float))))
+    name_1c = dict(zip(df_q['SKU'], df_q.get('Наименование 1С', pd.Series(dtype=str))))
 
     # Остатки
     print("Загрузка остатков...")
-    raw_stocks = fetch_stocks()
+    raw_stocks = fetch_stocks(creds=creds)
     df_stock = process_stocks(raw_stocks)
 
     # Продажи
     print(f"Загрузка продаж за {days_sales} дней...")
-    raw_postings = fetch_postings(days_sales)
+    raw_postings = fetch_postings(days_sales, creds=creds)
     df_sales = process_sales(raw_postings)
 
     print("Обработка данных...")
@@ -329,12 +372,12 @@ def build_supply_plan(
         'free_to_sell_amount': 'sum', 'promised_amount': 'sum',
     }).reset_index()
     stock_cluster.columns = ['sku', 'name', 'cluster', 'stock', 'in_transit']
-    stock_cluster['stock_total'] = stock_cluster['stock'] + stock_cluster['in_transit']
+    stock_cluster['stock_total'] = stock_cluster['stock']  # только свободный остаток (без in_transit к покупателю)
 
     # Продажи по кластерам
     if not df_sales.empty:
         sales_cluster = df_sales.groupby(
-            ['sku', 'name', 'wh_cluster']
+            ['sku', 'name', 'dest_cluster']
         ).agg({'quantity': 'sum'}).reset_index()
         sales_cluster.columns = ['sku', 'name', 'cluster', 'sold']
         sales_cluster['daily'] = (sales_cluster['sold'] / days_sales).round(2)
@@ -359,12 +402,20 @@ def build_supply_plan(
     df_plan['name_1c'] = df_plan['sku_str'].map(name_1c)
     df_plan['quant'] = df_plan['sku_str'].map(quants).fillna(6).astype(int)
 
+    # Map SKU → article from catalog DB
+    try:
+        from db import get_catalog_sku_map
+        sku_to_art = get_catalog_sku_map(user_id=user_id)
+        df_plan['article'] = df_plan['sku_str'].map(sku_to_art).fillna('')
+    except Exception:
+        df_plan['article'] = ''
+
     df_plan['days'] = (
         df_plan['stock_total'] / df_plan['daily'].replace(0, 0.0001)
     ).round(0).clip(upper=999)
     df_plan.loc[df_plan['daily'] == 0, 'days'] = 999
     df_plan['need'] = (
-        (df_plan['daily'] * days_plan) - df_plan['stock_total']
+        (df_plan['daily'] * days_plan) - df_plan['stock'] - df_plan['in_transit']
     ).clip(lower=0).round(0)
     df_plan['boxes'] = np.ceil(df_plan['need'] / df_plan['quant']).astype(int)
     df_plan.loc[(df_plan['need'] > 0) & (df_plan['boxes'] == 0), 'boxes'] = 1
@@ -402,13 +453,182 @@ def build_supply_plan(
         magistral_detail = pd.DataFrame()
         red_clusters = []
 
+    # ── Дни без продаж (для каждой пары sku × cluster) ──
+    from datetime import date as _date
+    today = _date.today()
+    if not df_sales.empty and 'sale_date' in df_sales.columns:
+        last_sale_cluster = (
+            df_sales.dropna(subset=['sale_date'])
+            .groupby(['sku', 'dest_cluster'])['sale_date'].max()
+            .reset_index()
+        )
+        last_sale_cluster.columns = ['sku', 'cluster', 'last_sale']
+        last_sale_sku = (
+            df_sales.dropna(subset=['sale_date'])
+            .groupby('sku')['sale_date'].max()
+            .reset_index()
+        )
+        last_sale_sku.columns = ['sku', 'last_sale_sku']
+    else:
+        last_sale_cluster = pd.DataFrame(columns=['sku', 'cluster', 'last_sale'])
+        last_sale_sku = pd.DataFrame(columns=['sku', 'last_sale_sku'])
+
+    df_plan = df_plan.merge(last_sale_cluster, on=['sku', 'cluster'], how='left')
+    df_plan['days_no_sale'] = df_plan['last_sale'].apply(
+        lambda d: (today - d).days if pd.notna(d) else days_sales
+    )
+    df_plan['liquidity'] = df_plan.apply(
+        lambda r: _liquidity_label(r['days'], r['sold']), axis=1
+    )
+
+    # ── Агрегаты для листов "Товары" и "Кластеры" ──
+    by_sku = df_plan.groupby(
+        ['sku', 'sku_str', 'article', 'name', 'name_1c', 'barcode', 'price', 'stock_italco']
+    ).agg(
+        stock_total=('stock_total', 'sum'),
+        in_transit=('in_transit', 'sum'),
+        sold=('sold', 'sum'),
+        daily=('daily', 'sum'),
+        order=('order', 'sum'),
+    ).reset_index()
+    by_sku['days'] = (by_sku['stock_total'] / by_sku['daily'].replace(0, 0.0001)).round(0).clip(upper=999)
+    by_sku.loc[by_sku['daily'] == 0, 'days'] = 999
+    by_sku = by_sku.merge(last_sale_sku, on='sku', how='left')
+    by_sku['days_no_sale'] = by_sku['last_sale_sku'].apply(
+        lambda d: (today - d).days if pd.notna(d) else days_sales
+    )
+    by_sku['liquidity'] = by_sku.apply(
+        lambda r: _liquidity_label(r['days'], r['sold']), axis=1
+    )
+    by_sku = by_sku.sort_values('order', ascending=False)
+
     # ── Сохранение Excel ──
     print(f"Сохранение {output}...")
     wb = Workbook()
 
+    # ╔════════════════════════════════════════════════════════════════╗
+    # ║ Листы в стиле Ozon (Наталья)                                  ║
+    # ╚════════════════════════════════════════════════════════════════╝
+
+    # Лист: Товар-склад (детализация SKU × конкретный склад)
+    ws_ts = wb.active
+    ws_ts.title = "Товар-склад"
+    ws_ts.append([
+        'Артикул', 'Название', 'SKU', 'Штрихкод', 'Кластер', 'Склад',
+        'Свободно', 'В заказах', 'В пути',
+    ])
+    if not df_stock.empty:
+        df_ts = df_stock.copy()
+        df_ts['sku_str'] = df_ts['sku'].astype(str).str.replace('.0', '', regex=False)
+        try:
+            from db import get_catalog_sku_map
+            ts_sku_to_art = get_catalog_sku_map(user_id=user_id)
+        except Exception:
+            ts_sku_to_art = {}
+        df_ts['article'] = df_ts['sku_str'].map(ts_sku_to_art).fillna('')
+        df_ts['barcode'] = df_ts['sku_str'].map(barcodes)
+        df_ts['name_1c_v'] = df_ts['sku_str'].map(name_1c)
+        df_ts = df_ts.sort_values(['cluster', 'item_name', 'warehouse_name'])
+        for _, r in df_ts.iterrows():
+            nm = r['name_1c_v'] if pd.notna(r['name_1c_v']) else r['item_name']
+            ws_ts.append([
+                str(r['article']) if r['article'] else '',
+                str(nm),
+                int(r['sku']) if pd.notna(r['sku']) else '',
+                str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
+                r['cluster'],
+                r['warehouse_name'],
+                int(r.get('free_to_sell_amount', 0) or 0),
+                int(r.get('reserved_amount', 0) or 0),
+                int(r.get('promised_amount', 0) or 0),
+            ])
+
+    # Лист: Товар-кластер (SKU × кластер с богатыми колонками)
+    ws_tk = wb.create_sheet("Товар-кластер")
+    ws_tk.append([
+        'Артикул', 'Название', 'SKU', 'Штрихкод', 'Кластер',
+        'Ликвидность', 'Дней до конца остатка',
+        f'Среднесут. продажи за {days_sales}д', 'Дней без продаж',
+        'Свободно', 'В пути', f'Продажи {days_sales}д', 'Заказать',
+    ])
+    df_tk = df_plan.sort_values(['cluster', 'order'], ascending=[True, False])
+    for _, r in df_tk.iterrows():
+        nm = r['name_1c'] if pd.notna(r['name_1c']) else r['name']
+        ws_tk.append([
+            str(r['article']) if r.get('article') else '',
+            str(nm),
+            int(r['sku']) if pd.notna(r['sku']) and r['sku'] else '',
+            str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
+            r['cluster'],
+            r['liquidity'],
+            int(r['days']),
+            round(r['daily'], 2),
+            int(r['days_no_sale']),
+            int(r['stock_total']),
+            int(r['in_transit']),
+            int(r['sold']),
+            int(r['order']),
+        ])
+
+    # Лист: Товары (агрегация по SKU)
+    ws_tv = wb.create_sheet("Товары")
+    ws_tv.append([
+        'Артикул', 'Название', 'SKU', 'Штрихкод', 'Цена', 'Сток Италко',
+        'Ликвидность', 'Дней до конца остатка',
+        f'Среднесут. продажи за {days_sales}д', 'Дней без продаж',
+        'Остаток всего', f'Продажи {days_sales}д', 'Заказать',
+    ])
+    for _, r in by_sku.iterrows():
+        nm = r['name_1c'] if pd.notna(r['name_1c']) else r['name']
+        ws_tv.append([
+            str(r['article']) if r['article'] else '',
+            str(nm),
+            int(r['sku']) if pd.notna(r['sku']) and r['sku'] else '',
+            str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
+            r['price'] if pd.notna(r['price']) else '',
+            str(r['stock_italco']) if pd.notna(r['stock_italco']) else '',
+            r['liquidity'],
+            int(r['days']),
+            round(r['daily'], 2),
+            int(r['days_no_sale']),
+            int(r['stock_total']),
+            int(r['sold']),
+            int(r['order']),
+        ])
+
+    # Лист: Кластеры (агрегация по кластерам)
+    ws_cl = wb.create_sheet("Кластеры")
+    ws_cl.append([
+        'Кластер', 'Ликвидность', 'Дней до конца остатка',
+        f'Среднесут. продажи за {days_sales}д',
+        'Остаток', f'Продажи {days_sales}д', 'Заказать',
+    ])
+    cluster_for_top = df_plan.groupby('cluster').agg(
+        stock_total=('stock_total', 'sum'),
+        sold=('sold', 'sum'),
+        daily=('daily', 'sum'),
+        order=('order', 'sum'),
+    ).reset_index()
+    cluster_for_top['days'] = (
+        cluster_for_top['stock_total'] / cluster_for_top['daily'].replace(0, 0.001)
+    ).round(0).clip(upper=999)
+    cluster_for_top['liquidity'] = cluster_for_top.apply(
+        lambda r: _liquidity_label(r['days'], r['sold']), axis=1
+    )
+    cluster_for_top = cluster_for_top.sort_values('days')
+    for _, r in cluster_for_top.iterrows():
+        ws_cl.append([
+            r['cluster'], r['liquidity'], int(r['days']),
+            round(r['daily'], 1), int(r['stock_total']),
+            int(r['sold']), int(r['order']),
+        ])
+
+    # ╔════════════════════════════════════════════════════════════════╗
+    # ║ Старые листы (наш привычный план)                              ║
+    # ╚════════════════════════════════════════════════════════════════╝
+
     # Вкладка 1: Остатки по складам
-    ws1 = wb.active
-    ws1.title = "Остатки по складам"
+    ws1 = wb.create_sheet("Остатки по складам")
     ws1.append(['Склад', 'Свободно', 'В заказах', 'В пути', 'Всего'])
     for _, r in stock_by_wh.iterrows():
         ws1.append([r['Склад'], int(r['Свободно']), int(r['В заказах']),
@@ -453,15 +673,16 @@ def build_supply_plan(
 
     # Вкладка 5: Сводный заказ
     df_cons = df_plan.groupby(
-        ['sku', 'name', 'name_1c', 'barcode', 'price', 'stock_italco']
+        ['sku', 'article', 'name', 'name_1c', 'barcode', 'price', 'stock_italco']
     ).agg({'stock_total': 'sum', 'sold': 'sum', 'order': 'sum'}).reset_index()
     df_cons = df_cons.sort_values('order', ascending=False)
 
     ws5 = wb.create_sheet("Сводный заказ")
-    ws5.append(['SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
+    ws5.append(['Артикул', 'SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
                 'Остаток Озон', f'Продажи {days_sales}д', 'Заказать'])
     for _, r in df_cons.iterrows():
         ws5.append([
+            str(r['article']) if r['article'] else '',
             int(r['sku']) if r['sku'] else '',
             str(r['name_1c']) if pd.notna(r['name_1c']) else str(r['name']),
             str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
@@ -472,18 +693,19 @@ def build_supply_plan(
 
     # Вкладка 6: Лента заказов
     df_lenta = df_plan[[
-        'sku', 'name_1c', 'name', 'barcode', 'price', 'stock_italco',
+        'article', 'sku', 'name_1c', 'name', 'barcode', 'price', 'stock_italco',
         'cluster', 'stock', 'in_transit', 'stock_total', 'sold', 'days',
         'quant', 'order',
     ]].copy()
     df_lenta = df_lenta.sort_values(['cluster', 'order'], ascending=[True, False])
 
     ws6 = wb.create_sheet("Лента заказов")
-    ws6.append(['SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
+    ws6.append(['Артикул', 'SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
                 'Кластер', 'Остаток', 'В пути', 'Всего',
                 f'Продажи {days_sales}д', 'Дней', 'Квант', 'Заказать'])
     for _, r in df_lenta.iterrows():
         ws6.append([
+            str(r['article']) if r['article'] else '',
             int(r['sku']) if r['sku'] else '',
             str(r['name_1c']) if pd.notna(r['name_1c']) else str(r['name']),
             str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
@@ -503,11 +725,12 @@ def build_supply_plan(
         if cl.empty:
             continue
         ws = wb.create_sheet(cluster[:31])
-        ws.append(['SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
+        ws.append(['Артикул', 'SKU', 'Название 1С', 'Штрихкод', 'Цена', 'Сток Италко',
                     'Остаток', 'В пути', 'Всего', f'Прод {days_sales}д',
                     'Прод/д', 'Дней', 'Квант', 'Заказать'])
         for _, r in cl.iterrows():
             ws.append([
+                str(r['article']) if r.get('article') else '',
                 int(r['sku']) if r['sku'] else '',
                 str(r['name_1c']) if pd.notna(r['name_1c']) else str(r['name']),
                 str(int(r['barcode'])) if pd.notna(r['barcode']) else '',
@@ -553,7 +776,7 @@ def load_cached_turnover():
 
 
 def compute_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN,
-                        quantum_file: str = QUANTUM_FILE):
+                        quantum_file: str = QUANTUM_FILE, creds=None, user_id=None):
     """Вычислить план поставок и магистраль без сохранения Excel.
 
     Returns dict with keys:
@@ -565,10 +788,10 @@ def compute_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN
     quants = dict(zip(df_q['SKU'], df_q['квант']))
     prices = dict(zip(df_q['SKU'], df_q['Цена']))
 
-    raw_stocks = fetch_stocks()
+    raw_stocks = fetch_stocks(creds=creds)
     df_stock = process_stocks(raw_stocks)
 
-    raw_postings = fetch_postings(days_sales)
+    raw_postings = fetch_postings(days_sales, creds=creds)
     df_sales = process_sales(raw_postings)
 
     # Остатки по кластерам
@@ -576,12 +799,12 @@ def compute_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN
         'free_to_sell_amount': 'sum', 'promised_amount': 'sum',
     }).reset_index()
     stock_cluster.columns = ['sku', 'name', 'cluster', 'stock', 'in_transit']
-    stock_cluster['stock_total'] = stock_cluster['stock'] + stock_cluster['in_transit']
+    stock_cluster['stock_total'] = stock_cluster['stock']  # только свободный остаток (без in_transit к покупателю)
 
     # Продажи по кластерам
     if not df_sales.empty:
         sales_cluster = df_sales.groupby(
-            ['sku', 'name', 'wh_cluster']
+            ['sku', 'name', 'dest_cluster']
         ).agg({'quantity': 'sum'}).reset_index()
         sales_cluster.columns = ['sku', 'name', 'cluster', 'sold']
         sales_cluster['daily'] = (sales_cluster['sold'] / days_sales).round(2)
@@ -602,12 +825,20 @@ def compute_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN
     df_plan['price'] = df_plan['sku_str'].map(prices)
     df_plan['quant'] = df_plan['sku_str'].map(quants).fillna(6).astype(int)
 
+    # Map SKU → article from catalog DB
+    try:
+        from db import get_catalog_sku_map
+        sku_to_art = get_catalog_sku_map(user_id=user_id)
+        df_plan['article'] = df_plan['sku_str'].map(sku_to_art).fillna('')
+    except Exception:
+        df_plan['article'] = ''
+
     df_plan['days'] = (
         df_plan['stock_total'] / df_plan['daily'].replace(0, 0.0001)
     ).round(0).clip(upper=999)
     df_plan.loc[df_plan['daily'] == 0, 'days'] = 999
     df_plan['need'] = (
-        (df_plan['daily'] * days_plan) - df_plan['stock_total']
+        (df_plan['daily'] * days_plan) - df_plan['stock'] - df_plan['in_transit']
     ).clip(lower=0).round(0)
     df_plan['boxes'] = np.ceil(df_plan['need'] / df_plan['quant']).astype(int)
     df_plan.loc[(df_plan['need'] > 0) & (df_plan['boxes'] == 0), 'boxes'] = 1

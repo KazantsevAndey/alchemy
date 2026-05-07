@@ -49,25 +49,70 @@ STATS_BASE = "https://statistics-api.wildberries.ru"
 _RATE_LIMIT_DELAY = 0.7
 
 
+_RATE_LIMIT_BACKOFF = (6, 30, 65)
+
+# Circuit breaker: после устойчивого 429 пропускаем последующие WB-запросы 10 мин.
+_RATE_LIMIT_COOLDOWN_SEC = 600
+_rate_limited_until = 0.0
+_cached_429_resp = None
+
+
+def _circuit_open() -> bool:
+    return _cached_429_resp is not None and time.monotonic() < _rate_limited_until
+
+
+def _trip_circuit(resp: requests.Response):
+    global _rate_limited_until, _cached_429_resp
+    if _cached_429_resp is None:
+        print(
+            f"  ⚠️ WB API упорно отдаёт 429 — пропускаю WB-запросы "
+            f"{_RATE_LIMIT_COOLDOWN_SEC // 60} мин"
+        )
+    _cached_429_resp = resp
+    _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN_SEC
+
+
+def _reset_circuit():
+    global _rate_limited_until, _cached_429_resp
+    _cached_429_resp = None
+    _rate_limited_until = 0.0
+
+
 def _safe_get(url: str, params: dict | None = None, creds=None) -> requests.Response:
+    if _circuit_open():
+        return _cached_429_resp
     headers = _wb_headers(creds)
     time.sleep(_RATE_LIMIT_DELAY)
     resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code == 429:
-        print("  Rate limit, жду 6 сек...")
-        time.sleep(6)
+    for wait in _RATE_LIMIT_BACKOFF:
+        if resp.status_code != 429:
+            break
+        print(f"  Rate limit, жду {wait} сек...")
+        time.sleep(wait)
         resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code == 429:
+        _trip_circuit(resp)
+    else:
+        _reset_circuit()
     return resp
 
 
 def _safe_post(url: str, json_data: dict, creds=None) -> requests.Response:
+    if _circuit_open():
+        return _cached_429_resp
     headers = _wb_headers(creds)
     time.sleep(_RATE_LIMIT_DELAY)
     resp = requests.post(url, headers=headers, json=json_data)
-    if resp.status_code == 429:
-        print("  Rate limit, жду 6 сек...")
-        time.sleep(6)
+    for wait in _RATE_LIMIT_BACKOFF:
+        if resp.status_code != 429:
+            break
+        print(f"  Rate limit, жду {wait} сек...")
+        time.sleep(wait)
         resp = requests.post(url, headers=headers, json=json_data)
+    if resp.status_code == 429:
+        _trip_circuit(resp)
+    else:
+        _reset_circuit()
     return resp
 
 

@@ -274,13 +274,38 @@ def build_price_df_from_catalog(user_id: int):
         return pd.DataFrame(columns=["Артикул", "Ozon SKU ID", "Наименование", "Цена в рублях"])
     data = []
     for r in rows:
+        # Convert ozon_sku to int (matching transaction sku type)
+        ozon_sku = r["ozon_sku"]
+        if ozon_sku:
+            try:
+                ozon_sku = int(ozon_sku)
+            except (ValueError, TypeError):
+                pass
         data.append({
             "Артикул": r["article"],
-            "Ozon SKU ID": r["ozon_sku"],
+            "Ozon SKU ID": ozon_sku,
             "Наименование": r["name"] or "",
             "Цена в рублях": r["cost_price"] or 0,
         })
     return pd.DataFrame(data)
+
+
+def get_catalog_sku_map(user_id: int = None) -> dict:
+    """Return {ozon_sku_str: article} mapping from product_catalog."""
+    conn = get_conn()
+    if user_id is not None:
+        rows = conn.execute(
+            "SELECT article, ozon_sku FROM product_catalog "
+            "WHERE user_id = ? AND ozon_sku IS NOT NULL AND ozon_sku != ''",
+            (user_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT article, ozon_sku FROM product_catalog "
+            "WHERE ozon_sku IS NOT NULL AND ozon_sku != ''"
+        ).fetchall()
+    conn.close()
+    return {str(r["ozon_sku"]): r["article"] for r in rows}
 
 
 def get_catalog_count(user_id: int) -> int:

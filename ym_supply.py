@@ -42,7 +42,7 @@ def _get_creds(creds):
 def _ym_headers(creds):
     c = _get_creds(creds)
     return {
-        "Api-Key": c["YM_API_KEY"],
+        "Api-Key": c.get("YM_API_KEY", ""),
         "Content-Type": "application/json",
     }
 
@@ -65,6 +65,10 @@ _CLUSTER_MAP = {
 # ── Загрузка квантов ──────────────────────────────────────────────────────
 
 def load_quants(path: str = QUANTUM_FILE) -> pd.DataFrame:
+    from pathlib import Path
+    if not Path(path).exists():
+        print(f"  Файл квантов не найден: {path} — используются значения по умолчанию")
+        return pd.DataFrame(columns=['Артикул', 'квант', 'Цена', 'Название'])
     df = pd.read_excel(path)
     df['Артикул'] = df['Артикул'].astype(str).str.strip()
     return df
@@ -325,7 +329,8 @@ def load_turnover_report(creds=None) -> pd.DataFrame:
 
 def compute_ym_supply_data(days_plan: int = DAYS_PLAN,
                            quantum_file: str = QUANTUM_FILE,
-                           lk_file_bytes: bytes = None):
+                           lk_file_bytes: bytes = None,
+                           creds=None):
     """Вычислить план поставок ЯМ.
 
     Если передан lk_file_bytes — парсит файл из ЛК (100% точность).
@@ -338,9 +343,9 @@ def compute_ym_supply_data(days_plan: int = DAYS_PLAN,
     """
     print("Загрузка квантов...")
     df_q = load_quants(quantum_file)
-    quants = dict(zip(df_q['Артикул'], df_q['квант']))
-    prices = dict(zip(df_q['Артикул'], df_q['Цена']))
-    names_q = dict(zip(df_q['Артикул'], df_q['Название']))
+    quants = dict(zip(df_q['Артикул'], df_q['квант'])) if not df_q.empty else {}
+    prices = dict(zip(df_q['Артикул'], df_q['Цена'])) if not df_q.empty else {}
+    names_q = dict(zip(df_q['Артикул'], df_q['Название'])) if not df_q.empty else {}
 
     # Загружаем данные: ЛК-файл (приоритет) или API (фоллбэк)
     source = "api"
@@ -354,7 +359,7 @@ def compute_ym_supply_data(days_plan: int = DAYS_PLAN,
 
     if source == "api":
         print("Загрузка отчёта оборачиваемости ЯМ (API)...")
-        df_plan = load_turnover_report()
+        df_plan = load_turnover_report(creds=creds)
 
     if df_plan.empty:
         print("  Нет данных")

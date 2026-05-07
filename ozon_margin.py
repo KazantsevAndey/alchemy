@@ -441,14 +441,10 @@ def get_ads_by_sku(date_from: str, date_to: str, period_name: str,
     result = result[result["sku"] > 0]
     result["sku"] = result["sku"].astype(int)
 
-    # SEARCH_PROMO: нельзя разбить по SKU, распределяем пропорционально выручке
-    if sp_spend > 0 and not result.empty:
-        total_sku_spend = result["ДРР"].sum()
-        if total_sku_spend > 0:
-            result["ДРР"] = result["ДРР"] + sp_spend * (result["ДРР"] / total_sku_spend)
-        else:
-            result["ДРР"] = result["ДРР"] + sp_spend / len(result)
-        result["ДРР"] = result["ДРР"].round(2)
+    # SEARCH_PROMO: атрибуции по SKU нет, не размазываем — иначе крупные SKU
+    # получают чужие расходы пропорционально своему собственному ДРР, что искажает
+    # юнит-экономику. Расход SEARCH_PROMO виден отдельно в начислениях
+    # ("Продвижение в поиске") и в общей сводке маркетплейса.
 
     print(f"  SKU с ДРР: {len(result)}")
     return result

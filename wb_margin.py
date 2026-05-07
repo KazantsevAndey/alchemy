@@ -82,8 +82,9 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
     """
     headers = _wb_headers(creds)
     all_rows = []
-    batch_size = 50
+    batch_size = 100
     total_batches = (len(campaign_ids) - 1) // batch_size + 1
+    failed_batches = 0
 
     for i in range(0, len(campaign_ids), batch_size):
         batch = campaign_ids[i : i + batch_size]
@@ -97,8 +98,8 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
         )
 
         if resp.status_code == 429:
-            print(f"    Пачка {batch_num}/{total_batches}: rate limit, жду 20с...")
-            time.sleep(20)
+            print(f"    Пачка {batch_num}/{total_batches}: rate limit, жду 65с...")
+            time.sleep(65)
             resp = requests.get(
                 "https://advert-api.wildberries.ru/adv/v3/fullstats",
                 headers=headers,
@@ -106,13 +107,15 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
             )
 
         if resp.status_code != 200:
+            failed_batches += 1
             print(f"    Пачка {batch_num}/{total_batches}: ошибка {resp.status_code}")
-            time.sleep(20)
+            time.sleep(65)
             continue
 
         campaigns = resp.json()
         if not isinstance(campaigns, list):
-            time.sleep(20)
+            failed_batches += 1
+            time.sleep(65)
             continue
 
         for campaign in campaigns:
@@ -125,7 +128,14 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
                             all_rows.append({"nm_id": nm_id, "adv_sum": adv_sum})
 
         print(f"    Пачка {batch_num}/{total_batches}: ок")
-        time.sleep(20)
+        time.sleep(65)
+
+    if failed_batches == total_batches:
+        raise RuntimeError(
+            f"WB /adv/v3/fullstats: все {total_batches} батчей упали ({date_from} → {date_to})"
+        )
+    if failed_batches:
+        print(f"  ⚠ {failed_batches}/{total_batches} батчей упало — ДРР неполный")
 
     if not all_rows:
         return pd.DataFrame(columns=["nm_id", "adv_sum"])
@@ -173,16 +183,26 @@ def load_report(date_from: str, date_to: str, period: str = "daily",
         }
         resp = requests.get(url, headers=headers, params=params)
 
-        if resp.status_code == 429:
-            print("  Rate limit, жду 65 сек...")
+        retries = 0
+        while resp.status_code == 429 and retries < 3:
+            retries += 1
+            print(f"  Rate limit, жду 65 сек... (попытка {retries}/3)")
             time.sleep(65)
             resp = requests.get(url, headers=headers, params=params)
+
+        if resp.status_code == 429:
+            raise RuntimeError(
+                f"WB reportDetailByPeriod: rate limit не отпустил после 3 попыток "
+                f"({date_from} → {date_to})"
+            )
 
         if resp.status_code == 204 or not resp.content:
             break
         if resp.status_code != 200:
-            print(f"  Ошибка: {resp.status_code}")
-            break
+            raise RuntimeError(
+                f"WB reportDetailByPeriod: ошибка {resp.status_code} "
+                f"({date_from} → {date_to})"
+            )
 
         data = resp.json()
         if not data:
@@ -201,6 +221,8 @@ def load_report(date_from: str, date_to: str, period: str = "daily",
 
 
 def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
     for f in NUMERIC_FIELDS:
         if f in df.columns:
             df[f] = pd.to_numeric(df[f], errors="coerce").fillna(0)

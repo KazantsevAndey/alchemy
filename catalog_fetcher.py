@@ -13,7 +13,7 @@ import requests
 def fetch_ozon_catalog(creds: dict) -> list[dict]:
     """Fetch all products from Ozon via /v2/product/list + /v3/product/info/list."""
     client_id = creds.get("OZON_SELLER_CLIENT_ID", "")
-    api_key = creds.get("OZON_SELLER_API_KEY_V2", creds.get("OZON_SELLER_API_KEY", ""))
+    api_key = creds.get("OZON_SELLER_API_KEY", "")
     if not client_id or not api_key:
         return []
 
@@ -28,12 +28,12 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
     product_ids = []
     last_id = ""
     while True:
-        body = {"filter": {"visibility": "ALL"}, "limit": 1000}
+        body = {"filter": {}, "limit": 1000}
         if last_id:
             body["last_id"] = last_id
-        resp = requests.post(f"{base}/v2/product/list", headers=headers, json=body, timeout=15)
+        resp = requests.post(f"{base}/v3/product/list", headers=headers, json=body, timeout=15)
         if resp.status_code != 200:
-            print(f"  Ozon /v2/product/list ошибка: {resp.status_code}")
+            print(f"  Ozon /v3/product/list ошибка: {resp.status_code}")
             break
         data = resp.json().get("result", {})
         items = data.get("items", [])
@@ -65,13 +65,16 @@ def fetch_ozon_catalog(creds: dict) -> list[dict]:
             offer_id = str(it.get("offer_id", "")).strip()
             if not offer_id:
                 continue
-            # Get FBO SKU
-            ozon_sku = str(it.get("fbo_sku", "")) if it.get("fbo_sku") else ""
+            # Get SKU from sources (fbo preferred, then any)
+            ozon_sku = ""
+            for src in it.get("sources", []):
+                if src.get("source") == "fbo":
+                    ozon_sku = str(src.get("sku", ""))
+                    break
             if not ozon_sku:
-                # Try sources
                 for src in it.get("sources", []):
-                    if src.get("source") == "fbo":
-                        ozon_sku = str(src.get("sku", ""))
+                    if src.get("sku"):
+                        ozon_sku = str(src["sku"])
                         break
             result.append({
                 "article": offer_id,
@@ -134,8 +137,12 @@ def fetch_wb_catalog(creds: dict) -> list[dict]:
 
 # ── Yandex Market ────────────────────────────────────────────────────
 
-def fetch_ym_catalog(creds: dict) -> list[dict]:
-    """Fetch all offers from YM via /businesses/{id}/offer-mappings."""
+def fetch_ym_catalog(creds: dict, known_articles: set | None = None) -> list[dict]:
+    """Fetch offers from YM via /businesses/{id}/offer-mappings.
+
+    If known_articles is provided, only fetch offers matching those articles
+    (batch lookup by offerId). Otherwise fetches all — can be slow for large catalogs.
+    """
     api_key = creds.get("YM_API_KEY", "")
     business_id = creds.get("YM_BUSINESS_ID", "")
     if not api_key or not business_id:
@@ -147,6 +154,35 @@ def fetch_ym_catalog(creds: dict) -> list[dict]:
     }
     base = "https://api.partner.market.yandex.ru"
 
+    # If we know articles from other MPs, fetch only those (much faster)
+    if known_articles:
+        result = []
+        arts = [a for a in known_articles if a and a != "0" and a != "nan"]
+        for i in range(0, len(arts), 100):
+            batch = arts[i:i + 100]
+            body = {"offerIds": batch}
+            resp = requests.post(
+                f"{base}/businesses/{business_id}/offer-mappings",
+                headers=headers, json=body, timeout=15,
+            )
+            if resp.status_code != 200:
+                print(f"  YM offer-mappings ошибка: {resp.status_code}")
+                break
+            for m in resp.json().get("result", {}).get("offerMappings", []):
+                offer = m.get("offer", {})
+                shop_sku = str(offer.get("offerId", "")).strip()
+                if not shop_sku:
+                    continue
+                mapping = m.get("mapping", {})
+                result.append({
+                    "article": shop_sku,
+                    "name": offer.get("name", ""),
+                    "ym_market_sku": str(mapping.get("marketSku", "")) if mapping.get("marketSku") else "",
+                })
+        print(f"  YM: {len(result)} товаров загружено (из {len(arts)} запрошенных)")
+        return result
+
+    # Full scan fallback
     result = []
     page_token = None
     while True:

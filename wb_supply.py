@@ -41,7 +41,7 @@ def _get_creds(creds):
 def _wb_headers(creds):
     c = _get_creds(creds)
     return {
-        "Authorization": c["WB_API_KEY"],
+        "Authorization": c.get("WB_API_KEY", ""),
         "Content-Type": "application/json",
     }
 
@@ -83,6 +83,10 @@ def _wh_cluster(name: str) -> str:
 # ── Загрузка квантов ──────────────────────────────────────────────────────
 
 def load_quants(path: str = QUANTUM_FILE) -> pd.DataFrame:
+    from pathlib import Path
+    if not Path(path).exists():
+        print(f"  Файл квантов не найден: {path} — используются значения по умолчанию")
+        return pd.DataFrame(columns=['Артикул', 'квант', 'Цена', 'Название'])
     df = pd.read_excel(path)
     df['Артикул'] = df['Артикул'].astype(str).str.strip()
     return df
@@ -220,7 +224,7 @@ def get_wb_stock_turnover(days: int = DAYS_SALES) -> pd.DataFrame:
 # ── План поставок ─────────────────────────────────────────────────────────
 
 def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN,
-                           quantum_file: str = QUANTUM_FILE):
+                           quantum_file: str = QUANTUM_FILE, creds=None):
     """Вычислить план поставок WB для дашборда.
 
     Returns dict:
@@ -229,12 +233,12 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
     """
     # Кванты и цены
     df_q = load_quants(quantum_file)
-    quants = dict(zip(df_q['Артикул'], df_q['квант']))
-    prices = dict(zip(df_q['Артикул'], df_q['Цена']))
-    names = dict(zip(df_q['Артикул'], df_q['Название']))
+    quants = dict(zip(df_q['Артикул'], df_q['квант'])) if not df_q.empty else {}
+    prices = dict(zip(df_q['Артикул'], df_q['Цена'])) if not df_q.empty else {}
+    names = dict(zip(df_q['Артикул'], df_q['Название'])) if not df_q.empty else {}
 
     # Остатки
-    stocks = get_wb_stocks()
+    stocks = get_wb_stocks(creds=creds)
     if stocks.empty:
         return None
 
@@ -245,7 +249,7 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
     stock_cl.rename(columns={'supplierArticle': 'article'}, inplace=True)
 
     # Продажи
-    sales = get_wb_sales_by_warehouse(days_sales)
+    sales = get_wb_sales_by_warehouse(days_sales, creds=creds)
 
     if not sales.empty:
         sales_cl = sales.groupby(['article', 'cluster']).agg(

@@ -14,14 +14,15 @@ from user_context import get_user_credentials, has_marketplace_credentials
 def _export_excel(catalog: list[dict]) -> bytes:
     """Export catalog to Excel for offline editing."""
     df = pd.DataFrame(catalog)
-    cols = ["article", "name", "cost_price"]
+    cols = ["article", "ozon_sku", "name", "cost_price"]
     for c in cols:
         if c not in df.columns:
             df[c] = ""
     df = df[cols].rename(columns={
         "article": "Артикул",
+        "ozon_sku": "Ozon SKU ID",
         "name": "Наименование",
-        "cost_price": "Себестоимость",
+        "cost_price": "Цена в рублях",
     })
     buf = io.BytesIO()
     df.to_excel(buf, index=False, sheet_name="Каталог")
@@ -31,13 +32,16 @@ def _export_excel(catalog: list[dict]) -> bytes:
 def render(user_id: int):
     st.title("Себестоимость")
 
-    tab1, tab2 = st.tabs(["Каталог товаров", "Загрузить файл"])
+    tab1, tab2, tab3 = st.tabs(["Каталог товаров", "Загрузить файл", "Кванты поставок"])
 
     with tab1:
         _render_catalog(user_id)
 
     with tab2:
         _render_upload(user_id)
+
+    with tab3:
+        _render_quants(user_id)
 
 
 def _render_catalog(user_id: int):
@@ -132,31 +136,39 @@ def _render_catalog(user_id: int):
 
 def _fetch_catalog(user_id: int, creds: dict):
     """Fetch product catalogs from all connected marketplaces."""
+    import time as _t
     from catalog_fetcher import fetch_ozon_catalog, fetch_wb_catalog, fetch_ym_catalog, merge_catalogs
 
     ozon_items, wb_items, ym_items = [], [], []
 
     with st.status("Загрузка каталога...", expanded=True) as status:
         if creds.get("OZON_SELLER_CLIENT_ID"):
-            st.write("Ozon: загрузка товаров...")
+            st.write("Ozon: загрузка...")
+            t0 = _t.time()
             ozon_items = fetch_ozon_catalog(creds)
-            st.write(f"Ozon: {len(ozon_items)} товаров")
+            st.write(f"Ozon: {len(ozon_items)} товаров ({_t.time()-t0:.1f}с)")
 
         if creds.get("WB_API_KEY"):
-            st.write("WB: загрузка товаров...")
+            st.write("WB: загрузка...")
+            t0 = _t.time()
             wb_items = fetch_wb_catalog(creds)
-            st.write(f"WB: {len(wb_items)} товаров")
+            st.write(f"WB: {len(wb_items)} товаров ({_t.time()-t0:.1f}с)")
 
         if creds.get("YM_API_KEY"):
-            st.write("YM: загрузка товаров...")
-            ym_items = fetch_ym_catalog(creds)
-            st.write(f"YM: {len(ym_items)} товаров")
+            # Pass known articles from Ozon/WB so YM doesn't scan 20k+ items
+            known = {it["article"] for it in ozon_items + wb_items}
+            st.write(f"YM: загрузка ({len(known)} артикулов)...")
+            t0 = _t.time()
+            ym_items = fetch_ym_catalog(creds, known_articles=known if known else None)
+            st.write(f"YM: {len(ym_items)} товаров ({_t.time()-t0:.1f}с)")
 
         merged = merge_catalogs(ozon_items, wb_items, ym_items)
         st.write(f"Итого уникальных артикулов: {len(merged)}")
 
         if merged:
+            t0 = _t.time()
             upsert_catalog_items(user_id, merged)
+            st.write(f"Сохранено за {_t.time()-t0:.1f}с")
             status.update(label=f"Каталог обновлён: {len(merged)} товаров", state="complete")
         else:
             status.update(label="Товары не найдены", state="error")
@@ -236,3 +248,88 @@ def _render_upload(user_id: int):
 
         st.success(f"Загружено {len(updates)} цен")
         st.rerun()
+
+
+def _get_quantum_path(user_id: int) -> str:
+    """Path to user's quantum file."""
+    from pathlib import Path
+    d = Path(f"data/user_{user_id}")
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d / "quantum_stock.xlsx")
+
+
+def _export_quantum_template(catalog: list[dict]) -> bytes:
+    """Generate quantum template Excel from catalog."""
+    df = pd.DataFrame(catalog)
+    cols_out = pd.DataFrame({
+        "Артикул": df["article"].astype(str).str.strip(),
+        "SKU": df["ozon_sku"].fillna("") if "ozon_sku" in df.columns else "",
+        "Название": df["name"].fillna("") if "name" in df.columns else "",
+        "квант": 1,
+        "Цена": df["cost_price"].fillna(0) if "cost_price" in df.columns else 0,
+    })
+    buf = io.BytesIO()
+    cols_out.to_excel(buf, index=False, sheet_name="Кванты")
+    return buf.getvalue()
+
+
+def _render_quants(user_id: int):
+    """Tab for managing quantum (packaging units) file."""
+    from pathlib import Path
+
+    quantum_path = _get_quantum_path(user_id)
+    has_file = Path(quantum_path).exists()
+
+    if has_file:
+        try:
+            existing = pd.read_excel(quantum_path)
+            st.success(f"Файл квантов загружен: **{len(existing)}** строк")
+            st.dataframe(existing.head(20), use_container_width=True)
+        except Exception as e:
+            st.error(f"Ошибка чтения файла: {e}")
+    else:
+        st.info("Файл квантов не загружен. Поставки рассчитываются с квантом = 1 по умолчанию.")
+
+    st.divider()
+
+    # Download template
+    catalog_count = get_catalog_count(user_id)
+    if catalog_count > 0:
+        catalog = get_catalog(user_id)
+        st.download_button(
+            "Скачать шаблон квантов",
+            data=_export_quantum_template(catalog),
+            file_name="quantum_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.caption("Шаблон содержит артикулы из каталога. Заполните колонку «квант» и загрузите обратно.")
+    else:
+        st.caption("Сначала сформируйте каталог товаров, чтобы скачать шаблон.")
+
+    # Upload
+    uploaded = st.file_uploader("Загрузить файл квантов", type=["xlsx", "xls"], key="quantum_upload")
+    if uploaded:
+        try:
+            df = pd.read_excel(uploaded)
+        except Exception as e:
+            st.error(f"Не удалось прочитать файл: {e}")
+            return
+
+        if df.empty:
+            st.error("Файл пустой")
+            return
+
+        # Validate required columns
+        has_article = "Артикул" in df.columns
+        has_quant = "квант" in df.columns
+        if not has_article or not has_quant:
+            st.error(f"Нужны колонки «Артикул» и «квант». В файле: {', '.join(df.columns.tolist())}")
+            return
+
+        st.success(f"Найдено **{len(df)}** строк")
+        st.dataframe(df.head(10), use_container_width=True)
+
+        if st.button("Сохранить кванты", type="primary", key="save_quants"):
+            df.to_excel(quantum_path, index=False)
+            st.success("Файл квантов сохранён")
+            st.rerun()
