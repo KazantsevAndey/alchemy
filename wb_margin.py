@@ -52,7 +52,13 @@ NUMERIC_FIELDS = [
 # ── Реклама (ДРР) через Promotion API ───────────────────────────────────
 
 def _get_campaign_ids(creds=None) -> list[int]:
-    """Получает ID всех рекламных кампаний."""
+    """ID рекламных кампаний, у которых может быть расход в текущем периоде.
+
+    WB-status: 9=активна, 11=на паузе, 7=архив, 4=готова к запуску.
+    Архивные кампании в текущем месяце расход почти не приносят, поэтому
+    их пропускаем — это сокращает число запросов в /adv/v3/fullstats
+    в разы (1 req/min — основной bottleneck).
+    """
     headers = _wb_headers(creds)
     resp = requests.get(
         "https://advert-api.wildberries.ru/adv/v1/promotion/count",
@@ -64,13 +70,19 @@ def _get_campaign_ids(creds=None) -> list[int]:
 
     data = resp.json()
     ids = []
+    skipped_archived = 0
     for group in data.get("adverts") or []:
+        status = group.get("status")
+        if status not in (9, 11, 4):  # активные, пауза, готовые к запуску
+            skipped_archived += sum(1 for it in (group.get("advert_list") or [])
+                                    if it.get("advertId"))
+            continue
         for item in group.get("advert_list") or []:
             adv_id = item.get("advertId")
             if adv_id:
                 ids.append(adv_id)
 
-    print(f"  Рекламных кампаний: {len(ids)}")
+    print(f"  Рекламных кампаний: {len(ids)} (пропущено архивных: {skipped_archived})")
     return ids
 
 
@@ -82,7 +94,9 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
     """
     headers = _wb_headers(creds)
     all_rows = []
-    batch_size = 100
+    # WB /adv/v3/fullstats: GET-параметр ids — длинные пакеты дают 400.
+    # Колаб использует 10 — проверено и работает. 100 = слишком много.
+    batch_size = 10
     total_batches = (len(campaign_ids) - 1) // batch_size + 1
     failed_batches = 0
 
@@ -146,14 +160,17 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
 
 
 def get_wb_ads(date_from: str, date_to: str, period_name: str,
-               creds=None) -> pd.DataFrame:
+               creds=None, campaign_ids: list[int] | None = None) -> pd.DataFrame:
     """Получает рекламные расходы по nm_id за период.
 
     date_to не должен быть сегодняшним днём (API не отдаёт данные за текущий день).
+    Если campaign_ids передан — пропускаем запрос к /adv/v1/promotion/count.
+    Полезно когда get_wb_ads вызывается несколько раз подряд (вчера + месяц).
     """
     print(f"\nДРР {period_name}: {date_from} — {date_to}")
 
-    campaign_ids = _get_campaign_ids(creds)
+    if campaign_ids is None:
+        campaign_ids = _get_campaign_ids(creds)
     if not campaign_ids:
         return pd.DataFrame(columns=["nm_id", "adv_sum"])
 

@@ -220,12 +220,38 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
                 & (wb_all["sale_date"] <= yesterday_date)
             ].copy()
 
-            # Реклама за вчера: best-effort
+            # Реклама за вчера: best-effort. Получаем список кампаний один раз
+            # и переиспользуем для месяца — иначе второй запрос /promotion/count
+            # часто получает 429 (общий cooldown аккаунта после fullstats-затыка).
+            from wb_margin import _get_campaign_ids
             try:
-                wb_ads_y = get_wb_ads(day_before, day_before, "за вчера", creds)
+                wb_campaign_ids = _get_campaign_ids(creds)
             except Exception as e:
-                print(f"  get_wb_ads(вчера) упал: {e} — adv_sum=0")
-                wb_ads_y = pd.DataFrame(columns=["nm_id", "adv_sum"])
+                print(f"  _get_campaign_ids упал: {e}")
+                wb_campaign_ids = []
+
+            def _ads_with_fallback(period_key: str, date_from: str, date_to: str, label: str) -> pd.DataFrame:
+                """Если свежий fetch пустой — берём adv_sum из предыдущего кэша,
+                чтобы не затирать known-good значения нулями при rate-limit."""
+                try:
+                    fresh = get_wb_ads(date_from, date_to, label,
+                                       creds=creds, campaign_ids=wb_campaign_ids)
+                except Exception as e:
+                    print(f"  get_wb_ads({label}) упал: {e}")
+                    fresh = pd.DataFrame(columns=["nm_id", "adv_sum"])
+                if not fresh.empty and fresh["adv_sum"].sum() > 0:
+                    return fresh
+                # Свежий fetch ничего не дал — пробуем предыдущий кэш
+                prev_agg = load(period_key, user_id)
+                if prev_agg is not None and not prev_agg.empty and "adv_sum" in prev_agg.columns:
+                    prev_adv = prev_agg[prev_agg["adv_sum"] > 0][["nm_id", "adv_sum"]].copy()
+                    if not prev_adv.empty:
+                        print(f"  → использую adv_sum из прошлого кэша {period_key} "
+                              f"({len(prev_adv)} SKU, {prev_adv['adv_sum'].sum():,.0f} ₽)")
+                        return prev_adv
+                return fresh
+
+            wb_ads_y = _ads_with_fallback("wb_agg_y", day_before, day_before, "за вчера")
 
             wb_sum_y = wb_calc_summary(wb_df_y, "Вчера")
             wb_agg_y = wb_calc_unit_economics(wb_df_y, price, wb_ads_y)
@@ -237,12 +263,9 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
             print("=" * 60)
             wb_df_m = wb_all
 
-            # Реклама за месяц: best-effort
-            try:
-                wb_ads_m = get_wb_ads(dm, day_before, "за месяц", creds)
-            except Exception as e:
-                print(f"  get_wb_ads(месяц) упал: {e} — adv_sum=0")
-                wb_ads_m = pd.DataFrame(columns=["nm_id", "adv_sum"])
+            # Реклама за месяц: best-effort, переиспользуем список кампаний.
+            # Если 429 — используем известные значения из прошлого кэша.
+            wb_ads_m = _ads_with_fallback("wb_agg_m", dm, day_before, "за месяц")
 
             wb_sum_m = wb_calc_summary(wb_df_m, "Месяц")
             wb_agg_m = wb_calc_unit_economics(wb_df_m, price, wb_ads_m)

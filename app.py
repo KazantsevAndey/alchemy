@@ -1250,7 +1250,7 @@ elif page == "🔵 Ozon":
         )
 
     # ── Period radio ──
-    oz_period = st.radio("Период", ["Месяц", "Вчера"], horizontal=True, key="oz_period")
+    oz_period = st.radio("Период", ["Вчера", "Месяц"], horizontal=True, key="oz_period")
     _oz_nach_key = "oz_nach_m" if oz_period == "Месяц" else "oz_nach_y"
     _oz_final_key = "oz_final_m" if oz_period == "Месяц" else "oz_final_y"
     oz_nach = C(_oz_nach_key)
@@ -1351,7 +1351,7 @@ elif page == "🔵 Ozon":
     st.divider()
     st.markdown('<div class="section-label"><span class="section-dot" style="background:#2563eb"></span>АНАЛИЗ ДРР</div>', unsafe_allow_html=True)
 
-    oz_drr_period = st.radio("Период", ["Месяц", "Вчера"], horizontal=True, key="oz_drr_period")
+    oz_drr_period = st.radio("Период", ["Вчера", "Месяц"], horizontal=True, key="oz_drr_period")
     oz_drr_src = C("oz_final_m") if oz_drr_period == "Месяц" else C("oz_final_y")
 
     if oz_drr_src is not None and not oz_drr_src.empty and "ДРР" in oz_drr_src.columns:
@@ -1528,7 +1528,7 @@ elif page == "🟣 WB":
         )
 
     # ── Period radio ──
-    wb_period = st.radio("Период", ["Месяц", "Вчера"], horizontal=True, key="wb_period")
+    wb_period = st.radio("Период", ["Вчера", "Месяц"], horizontal=True, key="wb_period")
     _wb_df_key = "wb_df_m" if wb_period == "Месяц" else "wb_df_y"
     _wb_sum_key = "wb_sum_m" if wb_period == "Месяц" else "wb_sum_y"
     _wb_agg_key = "wb_agg_m" if wb_period == "Месяц" else "wb_agg_y"
@@ -1646,7 +1646,7 @@ elif page == "🟣 WB":
     st.divider()
     st.markdown('<div class="section-label"><span class="section-dot" style="background:#7c3aed"></span>АНАЛИЗ ДРР</div>', unsafe_allow_html=True)
 
-    wb_drr_period = st.radio("Период", ["Месяц", "Вчера"], horizontal=True, key="wb_drr_period")
+    wb_drr_period = st.radio("Период", ["Вчера", "Месяц"], horizontal=True, key="wb_drr_period")
     wb_drr_src = C("wb_agg_m") if wb_drr_period == "Месяц" else C("wb_agg_y")
 
     if wb_drr_src is not None and not wb_drr_src.empty and "adv_sum" in wb_drr_src.columns:
