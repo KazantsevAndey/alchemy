@@ -144,12 +144,13 @@ def _fetch_fullstats(campaign_ids: list[int], date_from: str, date_to: str,
         print(f"    Пачка {batch_num}/{total_batches}: ок")
         time.sleep(65)
 
-    if failed_batches == total_batches:
-        raise RuntimeError(
-            f"WB /adv/v3/fullstats: все {total_batches} батчей упали ({date_from} → {date_to})"
-        )
     if failed_batches:
-        print(f"  ⚠ {failed_batches}/{total_batches} батчей упало — ДРР неполный")
+        # Любой провал батча = неполные данные. Лучше raise чтобы caller
+        # использовал fallback на предыдущий кэш, чем сохранять "0.4% правды".
+        raise RuntimeError(
+            f"WB /adv/v3/fullstats: {failed_batches}/{total_batches} батчей упало "
+            f"({date_from} → {date_to})"
+        )
 
     if not all_rows:
         return pd.DataFrame(columns=["nm_id", "adv_sum"])
@@ -257,10 +258,23 @@ def calc_summary(df: pd.DataFrame, label: str) -> dict:
     k_per = sales["ppvz_for_pay"].sum() - returns["ppvz_for_pay"].sum()
     logist = df["delivery_rub"].sum()
     storage = df["storage_fee"].sum()
-    deduction = df["deduction"].sum()
+    deduction_all = df["deduction"].sum()
     loyal_cost = df["cashback_commission_change"].sum()
     loyal_balls = df["cashback_amount"].sum()
-    itogo = k_per - logist - storage - deduction - loyal_cost - loyal_balls
+
+    # «WB Продвижение» — это реклама, попавшая в строку 'Удержание' по
+    # документу периодической оплаты. Выделяем её в отдельную категорию
+    # рекламных расходов, чтобы не смешивать со штрафами/корректировками.
+    wb_promo_extra = 0.0
+    if "bonus_type_name" in df.columns and "supplier_oper_name" in df.columns:
+        promo_mask = (
+            (df["supplier_oper_name"] == "Удержание")
+            & df["bonus_type_name"].fillna("").str.contains("WB Продвижение", case=False, na=False)
+        )
+        wb_promo_extra = float(df.loc[promo_mask, "deduction"].sum())
+
+    deduction = deduction_all - wb_promo_extra  # удержания без WB Продвижения
+    itogo = k_per - logist - storage - deduction_all - loyal_cost - loyal_balls
 
     qty_sold = int(sales["quantity"].sum())
     qty_ret = int(returns["quantity"].sum())
@@ -272,6 +286,8 @@ def calc_summary(df: pd.DataFrame, label: str) -> dict:
     print(f"  - Логистика:                 {logist:>12,.2f}")
     print(f"  - Хранение:                  {storage:>12,.2f}")
     print(f"  - Удержания:                 {deduction:>12,.2f}")
+    if wb_promo_extra:
+        print(f"  - WB Продвижение (реклама):  {wb_promo_extra:>12,.2f}")
     print(f"  - Стоимость лояльности:      {loyal_cost:>12,.2f}")
     print(f"  - Баллы лояльности:          {loyal_balls:>12,.2f}")
     print(f"  = ИТОГО к выплате:           {itogo:>12,.2f}")
@@ -281,6 +297,7 @@ def calc_summary(df: pd.DataFrame, label: str) -> dict:
         "k_per": k_per, "logist": logist, "storage": storage,
         "deduction": deduction, "loyal_cost": loyal_cost,
         "loyal_balls": loyal_balls, "itogo": itogo,
+        "wb_promo_extra": wb_promo_extra,
         "qty_sold": qty_sold, "qty_ret": qty_ret,
     }
 

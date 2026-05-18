@@ -105,9 +105,12 @@ def _wb(summary, agg):
         return {"rev": 0, "sebes": 0, "drr": 0, "profit": 0, "margin": 0, "vyr": 0, "sku": 0}
     rev = summary["itogo"]
     sebes = agg["sebes_total"].sum() if not agg.empty else 0
-    drr = agg["adv_sum"].sum() if not agg.empty else 0
+    # ДРР = реклама из advert-API + «WB Продвижение» (списано как удержание)
+    drr_api = agg["adv_sum"].sum() if not agg.empty else 0
+    drr_promo_extra = float(summary.get("wb_promo_extra", 0) or 0)
+    drr = drr_api + drr_promo_extra
     vyr = agg["vyruchka"].sum() if not agg.empty else 0
-    profit = rev - sebes - drr
+    profit = rev - sebes - drr_api  # itogo уже за вычетом promo_extra, не вычитаем дважды
     margin = (profit / vyr * 100) if vyr else 0
     return {"rev": rev, "sebes": sebes, "drr": drr, "profit": profit, "margin": margin, "vyr": vyr, "sku": len(agg)}
 
@@ -170,6 +173,7 @@ def _classify_oz_expense(name):
 _WB_GROUP_BY_LABEL = {
     "Лояльность": "regulated",
     "Баллы лояльности": "regulated",
+    "WB Продвижение": "regulated",
     "Логистика": "semi_regulated",
     "Хранение": "semi_regulated",
     "Обратная логистика": "semi_regulated",
@@ -218,14 +222,28 @@ def _wb_expenses(df_key, sum_key):
     wb_df = C(df_key)
     if wb_df is None or wb_df.empty:
         return {"total": 0, "items": {}, "groups": _group_expenses({}, lambda n: _WB_GROUP_BY_LABEL.get(n, "semi_regulated"))}
+
+    # Вычисляем «WB Продвижение» отдельно, остальное под «Удержания»
+    wb_promo_extra = 0.0
+    if "bonus_type_name" in wb_df.columns and "supplier_oper_name" in wb_df.columns:
+        promo_mask = (
+            (wb_df["supplier_oper_name"] == "Удержание")
+            & wb_df["bonus_type_name"].fillna("").str.contains("WB Продвижение", case=False, na=False)
+        )
+        wb_promo_extra = float(wb_df.loc[promo_mask, "deduction"].sum())
+
     expenses = {}
     for col, lbl in [("delivery_rub", "Логистика"), ("storage_fee", "Хранение"),
                      ("deduction", "Удержания"), ("penalty", "Штрафы"),
                      ("rebill_logistic_cost", "Обратная логистика")]:
         if col in wb_df.columns:
             val = wb_df[col].sum()
+            if col == "deduction":
+                val = val - wb_promo_extra  # WB Продвижение выводим отдельной строкой
             if val > 0:
                 expenses[lbl] = round(float(val), 0)
+    if wb_promo_extra > 0:
+        expenses["WB Продвижение"] = round(wb_promo_extra, 0)
     wb_sum = C(sum_key)
     if wb_sum:
         if wb_sum.get("loyal_cost", 0) > 0:
@@ -888,7 +906,7 @@ if page == "⚗️ Сводка":
     _summary_row("Месяц", oz_m, wb_m, "m")
 
     # ── AI ──
-    if st.button("🤖 AI", key="main_ai_signal", type="secondary"):
+    if st.button("ИИ анализ ситуации", key="main_ai_signal", type="primary"):
         full_json = _build_full_json()
         summary_text = _build_summary_text(full_json)
         margin_month = full_json["summary"]["month"]["total"]["margin_pct"]
@@ -1434,7 +1452,7 @@ elif page == "🔵 Ozon":
     st.divider()
     st.markdown('<div class="section-label"><span class="section-dot" style="background:#2563eb"></span>AI-АНАЛИЗ</div>', unsafe_allow_html=True)
 
-    if st.button("🤖 AI-анализ", key="oz_ai_btn", type="secondary"):
+    if st.button("ИИ анализ ситуации", key="oz_ai_btn", type="primary"):
         mp_json = _build_mp_json("Ozon")
         answer = None
         with st.spinner("Анализирую..."):
@@ -1730,7 +1748,7 @@ elif page == "🟣 WB":
     st.divider()
     st.markdown('<div class="section-label"><span class="section-dot" style="background:#7c3aed"></span>AI-АНАЛИЗ</div>', unsafe_allow_html=True)
 
-    if st.button("🤖 AI-анализ", key="wb_ai_btn", type="secondary"):
+    if st.button("ИИ анализ ситуации", key="wb_ai_btn", type="primary"):
         mp_json = _build_mp_json("WB")
         answer = None
         with st.spinner("Анализирую..."):
@@ -2121,7 +2139,7 @@ elif page == "🚛 Поставки":
             with st.spinner("Загрузка данных с WB и расчёт..."):
                 from wb_supply import compute_wb_supply_data
                 _qf = f"data/user_{_USER_ID}/quantum_stock.xlsx"
-                wb_result = compute_wb_supply_data(days_plan=wb_depth, creds=get_user_credentials(_USER_ID), quantum_file=_qf)
+                wb_result = compute_wb_supply_data(days_plan=wb_depth, creds=get_user_credentials(_USER_ID), quantum_file=_qf, user_id=_USER_ID)
                 st.session_state["wb_supply_result"] = wb_result
                 st.session_state["wb_supply_depth_used"] = wb_depth
 
@@ -2449,8 +2467,8 @@ elif page == "🚛 Поставки":
             mc1, mc2 = st.columns(2)
             with mc1:
                 with st.container(border=True):
-                    st.markdown(f"**🧛 Вампиры** ({len(vampires)})")
-                    st.caption("Забирают больше чем отдают")
+                    st.markdown(f"**:red[Вампиры]** ({len(vampires)})")
+                    st.caption("Получают сток с других кластеров")
                     for _, r in vampires.head(5).iterrows():
                         st.markdown(f"**{r['cluster']}** — +{r['balance']} шт")
                     if len(vampires) > 5:
@@ -2459,8 +2477,8 @@ elif page == "🚛 Поставки":
                                 st.markdown(f"**{r['cluster']}** — +{r['balance']} шт")
             with mc2:
                 with st.container(border=True):
-                    st.markdown(f"**🐹 Хомяки** ({len(hamsters)})")
-                    st.caption("Отдают больше чем забирают")
+                    st.markdown(f"**:green[Доноры]** ({len(hamsters)})")
+                    st.caption("Отправляют сток на другие кластеры")
                     for _, r in hamsters.head(5).iterrows():
                         st.markdown(f"**{r['cluster']}** — {r['balance']} шт")
                     if len(hamsters) > 5:

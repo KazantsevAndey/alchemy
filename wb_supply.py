@@ -68,6 +68,36 @@ WB_WH_TO_CLUSTER = {
     'Минск': 'Беларусь', 'Астана': 'Астана', 'Алматы': 'Алматы',
 }
 
+# Кластер → федеральный округ (для группировки в плане поставок)
+WB_CLUSTER_TO_DISTRICT = {
+    'Москва МО': 'ЦФО',
+    'Воронеж': 'ЦФО',
+    'СПб СЗО': 'СЗФО',
+    'Калининград': 'СЗФО',
+    'Казань': 'ПФО',
+    'Самара': 'ПФО',
+    'Пермь': 'ПФО',
+    'Саратов': 'ПФО',
+    'Екатеринбург': 'УФО',
+    'Тюмень': 'УФО',
+    'Новосибирск': 'СФО',
+    'Красноярск': 'СФО',
+    'Омск': 'СФО',
+    'Краснодар': 'ЮФО',
+    'Ростов': 'ЮФО',
+    'Невинномысск': 'СКФО',
+    'Махачкала': 'СКФО',
+    'Дальний Восток': 'ДФО',
+    'Беларусь': 'Беларусь',
+    'Астана': 'Казахстан',
+    'Алматы': 'Казахстан',
+    'Казахстан': 'Казахстан',
+    'Армения': 'Армения',
+    'Кыргызстан': 'Кыргызстан',
+    'Грузия': 'Грузия',
+    'Азербайджан': 'Азербайджан',
+}
+
 
 def _wh_cluster(name: str) -> str:
     """Маппинг склада WB в кластер. Fuzzy-fallback по первому слову."""
@@ -78,6 +108,11 @@ def _wh_cluster(name: str) -> str:
         if k.startswith(first):
             return v
     return 'Прочее'
+
+
+def _district(cluster: str) -> str:
+    """Кластер → федеральный округ."""
+    return WB_CLUSTER_TO_DISTRICT.get(cluster, 'Прочее')
 
 
 # ── Загрузка квантов ──────────────────────────────────────────────────────
@@ -223,8 +258,33 @@ def get_wb_stock_turnover(days: int = DAYS_SALES) -> pd.DataFrame:
 
 # ── План поставок ─────────────────────────────────────────────────────────
 
+def _sales_from_cache(user_id=None):
+    """Достать продажи по складам из кэша wb_df_m, без API-вызова.
+
+    Тот же reportDetailByPeriod уже скачан для расчёта маржи (`wb_df_m`),
+    нет смысла его повторно дёргать здесь. Возвращает DataFrame
+    с колонками [article, cluster, sold] либо пустой.
+    """
+    try:
+        from data_loader import load as _ld
+    except Exception:
+        return pd.DataFrame()
+    df = _ld('wb_df_m', user_id)
+    if df is None or df.empty or 'supplier_oper_name' not in df.columns:
+        return pd.DataFrame()
+    sales = df[df['supplier_oper_name'] == 'Продажа'].copy()
+    if sales.empty:
+        return pd.DataFrame()
+    sales['sa_name'] = sales['sa_name'].astype(str).str.strip()
+    sales['office_name'] = sales['office_name'].astype(str).str.strip()
+    sales['cluster'] = sales['office_name'].apply(_wh_cluster)
+    out = sales.groupby(['sa_name', 'cluster'])['quantity'].sum().reset_index()
+    out.columns = ['article', 'cluster', 'sold']
+    return out
+
+
 def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN,
-                           quantum_file: str = QUANTUM_FILE, creds=None):
+                           quantum_file: str = QUANTUM_FILE, creds=None, user_id=None):
     """Вычислить план поставок WB для дашборда.
 
     Returns dict:
@@ -237,9 +297,25 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
     prices = dict(zip(df_q['Артикул'], df_q['Цена'])) if not df_q.empty else {}
     names = dict(zip(df_q['Артикул'], df_q['Название'])) if not df_q.empty else {}
 
-    # Остатки
+    # Остатки: пытаемся свежие, при 429 — фоллбэк на кэш wb_stock_turnover
     stocks = get_wb_stocks(creds=creds)
     if stocks.empty:
+        print("  → пробуем кэш wb_stock_turnover")
+        try:
+            from data_loader import load as _ld
+            cached_t = _ld('wb_stock_turnover', user_id)
+            if cached_t is not None and not cached_t.empty:
+                stocks = cached_t.copy()
+                stocks.rename(columns={'article': 'supplierArticle'}, inplace=True)
+                if 'cluster' not in stocks.columns and 'warehouseName' in stocks.columns:
+                    stocks['cluster'] = stocks['warehouseName'].apply(_wh_cluster)
+                if 'quantity' not in stocks.columns and 'stock' in stocks.columns:
+                    stocks['quantity'] = stocks['stock']
+                print(f"  кэш wb_stock_turnover: {len(stocks)} строк")
+        except Exception as e:
+            print(f"  кэш fallback упал: {e}")
+    if stocks.empty:
+        print("  Остатки WB недоступны и кэша нет — план не построить")
         return None
 
     # Агрегируем остатки по артикулу + кластер
@@ -248,14 +324,18 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
     ).reset_index()
     stock_cl.rename(columns={'supplierArticle': 'article'}, inplace=True)
 
-    # Продажи
-    sales = get_wb_sales_by_warehouse(days_sales, creds=creds)
-
-    if not sales.empty:
-        sales_cl = sales.groupby(['article', 'cluster']).agg(
-            sold=('sold', 'sum'),
-        ).reset_index()
+    # Продажи: берём из уже скачанного wb_df_m (для маржи), без второго API-вызова
+    sales_cl_df = _sales_from_cache(user_id)
+    if sales_cl_df.empty:
+        # Кэш пуст — последняя попытка через API
+        print("  wb_df_m пуст, пробуем API")
+        api_sales = get_wb_sales_by_warehouse(days_sales, creds=creds)
+        if not api_sales.empty:
+            sales_cl_df = api_sales.groupby(['article', 'cluster'])['sold'].sum().reset_index()
+    if not sales_cl_df.empty:
+        sales_cl = sales_cl_df.copy()
         sales_cl['daily'] = (sales_cl['sold'] / days_sales).round(2)
+        print(f"  Продажи WB: {len(sales_cl)} строк (из кэша wb_df_m)")
     else:
         sales_cl = pd.DataFrame(columns=['article', 'cluster', 'sold', 'daily'])
 
@@ -264,6 +344,12 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
         sales_cl[['article', 'cluster', 'sold', 'daily']],
         on=['article', 'cluster'], how='outer',
     ).fillna(0)
+
+    # Маппим кластер → федеральный округ и переагрегируем по (article × district)
+    df_plan['district'] = df_plan['cluster'].apply(_district)
+    df_plan = df_plan.groupby(['article', 'district'], as_index=False).agg({
+        'stock': 'sum', 'sold': 'sum', 'daily': 'sum',
+    })
 
     # Названия из квантов
     df_plan['name'] = df_plan['article'].map(names).fillna('')
@@ -290,7 +376,10 @@ def compute_wb_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_P
     ] = 1
     df_plan['order'] = df_plan['boxes'] * df_plan['quant']
 
-    # Приоритет кластеров
+    # Для совместимости с UI оставляем поле 'cluster' = district
+    df_plan['cluster'] = df_plan['district']
+
+    # Приоритет округов
     cluster_sum = df_plan.groupby('cluster').agg({
         'stock': 'sum', 'sold': 'sum', 'daily': 'sum', 'order': 'sum',
     }).reset_index()

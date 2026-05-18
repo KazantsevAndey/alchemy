@@ -438,7 +438,7 @@ def build_supply_plan(
             (df_mag['Убытие/д'] / df_mag['Спрос/д'].replace(0, 0.001) - 1) * 100
         ).round(0)
         df_mag['Статус'] = df_mag['%'].apply(
-            lambda x: 'Хомяк' if x > 20 else ('Вампир' if x < -20 else 'Баланс'))
+            lambda x: 'Донор' if x > 20 else ('Вампир' if x < -20 else 'Баланс'))
         df_mag = df_mag.sort_values('%', ascending=False)
 
         red_clusters = df_mag[df_mag['%'] > 20]['Кластер'].tolist()
@@ -665,7 +665,7 @@ def build_supply_plan(
     # Вкладка 4: Магистраль товары
     if not magistral_detail.empty:
         ws4 = wb.create_sheet("Магистраль товары")
-        ws4.append(['SKU', 'Название', 'Откуда (хомяк)', 'Куда (вампир)',
+        ws4.append(['SKU', 'Название', 'Откуда (донор)', 'Куда (вампир)',
                      f'Кол-во {days_sales}д'])
         for _, r in magistral_detail.iterrows():
             ws4.append([int(r['SKU']) if r['SKU'] else '', str(r['Название']),
@@ -874,7 +874,7 @@ def compute_supply_data(days_sales: int = DAYS_SALES, days_plan: int = DAYS_PLAN
             (df_mag['Убытие/д'] / df_mag['Спрос/д'].replace(0, 0.001) - 1) * 100
         ).round(0)
         df_mag['Статус'] = df_mag['%'].apply(
-            lambda x: 'Хомяк' if x > 20 else ('Вампир' if x < -20 else 'Баланс'))
+            lambda x: 'Донор' if x > 20 else ('Вампир' if x < -20 else 'Баланс'))
         df_mag = df_mag.sort_values('%', ascending=False)
     else:
         df_mag = pd.DataFrame()
