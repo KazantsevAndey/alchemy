@@ -293,6 +293,12 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
                                      ym_cost_map, f"YM Вчера ({dy})")
             save("ym_margin_y", {"R": ym_R_y, "totals": ym_totals_y}, user_id)
 
+            # YM /reports лимит: 1 запрос в 2 минуты на businessId.
+            # Без паузы второй запрос (за месяц) гарантированно падает с 420.
+            print("YM: жду 125 сек до второго запроса (rate limit 1/2min)...")
+            import time as _t
+            _t.sleep(125)
+
             print("YM: данные за месяц...")
             ym_rev_m, ym_costs_m, ym_totals_m = load_services_report(dm, dy, creds)
             ym_R_m = ym_calc_margin(ym_rev_m, ym_costs_m, ym_totals_m,
