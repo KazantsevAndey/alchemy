@@ -79,7 +79,13 @@ def _generate_report(endpoint: str, payload: dict, creds=None) -> bytes | None:
         result = r.json().get("result", {})
         st = result.get("status")
         if st == "DONE":
-            return requests.get(result["file"], timeout=60).content
+            file_url = result.get("file") or result.get("downloadUrl") or result.get("url")
+            if not file_url:
+                # YM иногда отдаёт DONE до того как S3 проставит URL — пробуем ещё
+                print(f"  DONE без file URL, жду 5 сек…")
+                time.sleep(5)
+                continue
+            return requests.get(file_url, timeout=60).content
         if st == "FAILED":
             print(f"  Отчёт FAILED: {r.json()}")
             return None

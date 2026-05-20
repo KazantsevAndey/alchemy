@@ -251,7 +251,7 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
                         return prev_adv
                 return fresh
 
-            wb_ads_y = _ads_with_fallback("wb_agg_y", day_before, day_before, "за вчера")
+            wb_ads_y = _ads_with_fallback("wb_agg_y", dy, dy, "за вчера")
 
             wb_sum_y = wb_calc_summary(wb_df_y, "Вчера")
             wb_agg_y = wb_calc_unit_economics(wb_df_y, price, wb_ads_y)
@@ -265,7 +265,7 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
 
             # Реклама за месяц: best-effort, переиспользуем список кампаний.
             # Если 429 — используем известные значения из прошлого кэша.
-            wb_ads_m = _ads_with_fallback("wb_agg_m", dm, day_before, "за месяц")
+            wb_ads_m = _ads_with_fallback("wb_agg_m", dm, dy, "за месяц")
 
             wb_sum_m = wb_calc_summary(wb_df_m, "Месяц")
             wb_agg_m = wb_calc_unit_economics(wb_df_m, price, wb_ads_m)

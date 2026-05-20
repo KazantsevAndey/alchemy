@@ -111,7 +111,8 @@ def _wb(summary, agg):
     drr = drr_api + drr_promo_extra
     vyr = agg["vyruchka"].sum() if not agg.empty else 0
     profit = rev - sebes - drr_api  # itogo уже за вычетом promo_extra, не вычитаем дважды
-    margin = (profit / vyr * 100) if vyr else 0
+    # Маржа: % от "к выплате" (rev). Без себестоимости даёт 100%, что интуитивно.
+    margin = (profit / rev * 100) if rev else 0
     return {"rev": rev, "sebes": sebes, "drr": drr, "profit": profit, "margin": margin, "vyr": vyr, "sku": len(agg)}
 
 def _mc(val):
