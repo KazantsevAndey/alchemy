@@ -189,7 +189,9 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
             print("WB ВЧЕРА")
             print("=" * 60)
 
-            # Отчёт за месяц: пытаемся свежий, иначе фоллбэк на кэш
+            # Отчёт за месяц: пытаемся свежий, иначе фоллбэк на кэш.
+            # WB часто отдаёт финансовый отчёт с лагом 1-4 дня, поэтому ниже
+            # дополнительно выбираем последнюю доступную sale_date из ответа.
             wb_used_cache = False
             try:
                 wb_all = wb_prepare_df(wb_load_report(dm, dy, creds=creds))
@@ -204,16 +206,29 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
 
             yesterday_date = yesterday.date()
             month_start_date = month_start.date()
-            if wb_used_cache and not wb_all.empty:
-                latest_in_cache = wb_all["sale_date"].max()
-                if latest_in_cache < yesterday_date:
-                    print(f"  → 'вчера' заменено на последнюю дату в кэше: {latest_in_cache}")
-                    yesterday_date = latest_in_cache
-                    # Если новый месяц ещё не наступил в кэше — берём месяц,
-                    # в котором есть последние данные
-                    if month_start_date > latest_in_cache:
-                        month_start_date = latest_in_cache.replace(day=1)
-                        print(f"  → 'месяц' заменён на {month_start_date}–{latest_in_cache}")
+
+            if wb_all is None or wb_all.empty or "sale_date" not in wb_all.columns:
+                cached = load("wb_df_m", user_id)
+                if cached is None or cached.empty:
+                    raise RuntimeError("WB reportDetailByPeriod вернул пустой отчёт, и кэш wb_df_m тоже пуст")
+                print(f"  → WB вернул пустой отчёт, используем кэш wb_df_m ({len(cached)} строк)")
+                wb_all = cached
+                wb_used_cache = True
+
+            # Если WB ещё не отдал вчерашний день, берём последнюю дату,
+            # которая реально есть в отчёте. Это защищает от пустого wb_df_y.
+            latest_wb_date = wb_all["sale_date"].max()
+            if latest_wb_date < yesterday_date:
+                src = "кэше" if wb_used_cache else "ответе API"
+                print(f"  → 'вчера' заменено на последнюю дату в {src}: {latest_wb_date}")
+                yesterday_date = latest_wb_date
+                if month_start_date > latest_wb_date:
+                    month_start_date = latest_wb_date.replace(day=1)
+                    print(f"  → 'месяц' заменён на {month_start_date}–{latest_wb_date}")
+
+            wb_day = yesterday_date.strftime("%Y-%m-%d")
+            wb_month_start = month_start_date.strftime("%Y-%m-%d")
+
             wb_df_y = wb_all[wb_all["sale_date"] == yesterday_date].copy()
             wb_all = wb_all[
                 (wb_all["sale_date"] >= month_start_date)
@@ -251,7 +266,7 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
                         return prev_adv
                 return fresh
 
-            wb_ads_y = _ads_with_fallback("wb_agg_y", dy, dy, "за вчера")
+            wb_ads_y = _ads_with_fallback("wb_agg_y", wb_day, wb_day, "за вчера")
 
             wb_sum_y = wb_calc_summary(wb_df_y, "Вчера")
             wb_agg_y = wb_calc_unit_economics(wb_df_y, price, wb_ads_y)
@@ -265,7 +280,7 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
 
             # Реклама за месяц: best-effort, переиспользуем список кампаний.
             # Если 429 — используем известные значения из прошлого кэша.
-            wb_ads_m = _ads_with_fallback("wb_agg_m", dm, dy, "за месяц")
+            wb_ads_m = _ads_with_fallback("wb_agg_m", wb_month_start, wb_day, "за месяц")
 
             wb_sum_m = wb_calc_summary(wb_df_m, "Месяц")
             wb_agg_m = wb_calc_unit_economics(wb_df_m, price, wb_ads_m)
