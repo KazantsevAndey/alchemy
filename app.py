@@ -91,14 +91,19 @@ def _delta_str(v):
 
 def _oz(final, nach):
     if nach is None or final is None:
-        return {"rev": 0, "sebes": 0, "drr": 0, "profit": 0, "margin": 0, "sku": 0}
+        return {"rev": 0, "rev_gross": 0, "sebes": 0, "drr": 0, "profit": 0, "margin": 0, "sku": 0}
     tr = nach.loc[nach["operation_type_name"] == "Общая сумма", "amount"]
     rev = tr.values[0] if len(tr) else 0
+    # rev_gross — «Сумма отгрузки» (валовая выручка по SKU). Используется как
+    # знаменатель для ДРР %, чтобы LLM получал ту же базу, что в дашборде
+    # (виджет «ДРР % от выручки» в разделе АНАЛИЗ ДРР).
+    rev_gross = float(final["Сумма отгрузки"].sum()) if not final.empty else 0
     sebes = final["Сумма себестоимости"].sum() if not final.empty else 0
     drr = final["ДРР"].sum() if not final.empty else 0
     profit = rev - sebes
     margin = (profit / rev * 100) if rev else 0
-    return {"rev": rev, "sebes": sebes, "drr": drr, "profit": profit, "margin": margin, "sku": len(final)}
+    return {"rev": rev, "rev_gross": rev_gross, "sebes": sebes, "drr": drr,
+            "profit": profit, "margin": margin, "sku": len(final)}
 
 def _wb(summary, agg):
     if summary is None or agg is None:
@@ -287,9 +292,10 @@ def _build_full_json():
         r = {"revenue": round(float(d["rev"]), 0), "profit": round(float(d["profit"]), 0),
              "margin_pct": round(float(d["margin"]), 1)}
         if with_drr:
-            rev = d["rev"] if d["rev"] else 1
+            # ДРР % считаем от Сумма отгрузки (gross), как в дашборде «ДРР % от выручки».
+            base = d.get("rev_gross") or d["rev"] or 1
             r["drr_total"] = round(float(d["drr"]), 0)
-            r["drr_pct"] = round(float(d["drr"]) / float(rev) * 100, 1)
+            r["drr_pct"] = round(float(d["drr"]) / float(base) * 100, 1)
         return r
 
     # Top-10 SKU
@@ -325,7 +331,7 @@ def _build_full_json():
         "period": {"day": YSTR, "month_start": month_start.strftime("%Y-%m-%d"), "month_end": yesterday.strftime("%Y-%m-%d")},
         "summary": {
             "yesterday": {
-                "ozon": _s(oz_y), "wb": _s(wb_y), "ym": _ym_s(ym_y_ai),
+                "ozon": _s(oz_y, with_drr=True), "wb": _s(wb_y), "ym": _ym_s(ym_y_ai),
                 "total": {"revenue": round(t_y_rev, 0), "profit": round(t_y_prf, 0),
                            "margin_pct": round(t_y_prf / t_y_rev * 100, 1) if t_y_rev else 0}
             },
@@ -386,12 +392,8 @@ def _build_mp_json(mp):
     rev_y = sum_y.get("revenue", 0)
     rev_m = sum_m.get("revenue", 0)
 
-    # ДРР % за вчера: для Ozon — из «Оплата за клик» в расходах
-    if mp == "Ozon" and rev_y:
-        drr_y_total = exp_y.get("items", {}).get("Оплата за клик", 0)
-        if drr_y_total:
-            sum_y["drr_total"] = round(float(drr_y_total), 0)
-            sum_y["drr_pct"] = round(drr_y_total / rev_y * 100, 1)
+    # drr_total/drr_pct для Ozon уже посчитаны в _s(_, with_drr=True) и берут
+    # знаменатель из «Сумма отгрузки» (gross) — совпадает с дашбордом.
 
     exp_y_enriched = _enrich_expenses_with_pct(exp_y, rev_y)
     exp_m_enriched = _enrich_expenses_with_pct(exp_m, rev_m)
@@ -472,35 +474,74 @@ def _deepseek_call(system_prompt, user_prompt):
     creds = get_user_credentials(_USER_ID)
     DEEPSEEK_API_KEY = creds.get("DEEPSEEK_API_KEY", "")
     if not DEEPSEEK_API_KEY:
+        print("[deepseek] нет DEEPSEEK_API_KEY в кредах")
         return None
     import openai
     client = openai.OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-    resp = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=1200,
-        temperature=0.3,
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.3,
+        )
+    except Exception as e:
+        print(f"[deepseek] упал: {type(e).__name__}: {e}")
+        raise
+    answer = resp.choices[0].message.content
+    print(f"[deepseek] ok, {len(answer or '')} символов")
+
+    # DEBUG: дамп каждого вызова в llm_debug_out/ для отладки галлюцинаций
+    try:
+        import time as _t
+        from pathlib import Path as _P
+        _d = _P("llm_debug_out")
+        _d.mkdir(exist_ok=True)
+        _ts = _t.strftime("%Y%m%d_%H%M%S")
+        (_d / f"{_ts}_prompt.txt").write_text(system_prompt, encoding="utf-8")
+        (_d / f"{_ts}_input.txt").write_text(user_prompt, encoding="utf-8")
+        (_d / f"{_ts}_output.txt").write_text(answer or "", encoding="utf-8")
+    except Exception:
+        pass
+
+    return answer
 
 def _giga_call(system_prompt, user_prompt):
     """Call GigaChat, return answer or None."""
     creds = get_user_credentials(_USER_ID)
     GIGACHAT_CREDENTIALS = creds.get("GIGACHAT_CREDENTIALS", "")
     if not GIGACHAT_CREDENTIALS:
+        print("[gigachat] нет GIGACHAT_CREDENTIALS в кредах")
         return None
     from gigachat import GigaChat
     from gigachat.models import Chat, Messages, MessagesRole
-    with GigaChat(credentials=GIGACHAT_CREDENTIALS, scope="GIGACHAT_API_PERS",
-                  model="GigaChat", verify_ssl_certs=False) as giga:
-        resp = giga.chat(Chat(messages=[
-            Messages(role=MessagesRole.SYSTEM, content=system_prompt),
-            Messages(role=MessagesRole.USER, content=user_prompt),
-        ]))
-        return resp.choices[0].message.content
+    try:
+        with GigaChat(credentials=GIGACHAT_CREDENTIALS, scope="GIGACHAT_API_PERS",
+                      model="GigaChat", verify_ssl_certs=False) as giga:
+            resp = giga.chat(Chat(messages=[
+                Messages(role=MessagesRole.SYSTEM, content=system_prompt),
+                Messages(role=MessagesRole.USER, content=user_prompt),
+            ]))
+            answer = resp.choices[0].message.content
+            print(f"[gigachat] ok, {len(answer or '')} символов")
+            # DEBUG: дамп каждого вызова в llm_debug_out/
+            try:
+                import time as _t
+                from pathlib import Path as _P
+                _d = _P("llm_debug_out"); _d.mkdir(exist_ok=True)
+                _ts = _t.strftime("%Y%m%d_%H%M%S") + "_giga"
+                (_d / f"{_ts}_prompt.txt").write_text(system_prompt, encoding="utf-8")
+                (_d / f"{_ts}_input.txt").write_text(user_prompt, encoding="utf-8")
+                (_d / f"{_ts}_output.txt").write_text(answer or "", encoding="utf-8")
+            except Exception:
+                pass
+            return answer
+    except Exception as e:
+        print(f"[gigachat] упал: {type(e).__name__}: {e}")
+        raise
 
 _SIGNAL_SYSTEM = """Ты формируешь короткое AI-резюме для главной страницы дашборда e-commerce бизнеса на маркетплейсах.
 
@@ -855,8 +896,11 @@ with st.sidebar:
         creds = get_user_credentials(_USER_ID)
         price_path = get_user_price_path(_USER_ID)
         with st.spinner("Загрузка данных с API..."):
+            _status = st.empty()
             refresh_all_data(user_id=_USER_ID, creds=creds,
-                           price_path=str(price_path) if price_path else None)
+                           price_path=str(price_path) if price_path else None,
+                           progress_cb=lambda msg: _status.info(msg))
+            _status.empty()
         st.cache_data.clear()
         st.rerun()
 

@@ -93,13 +93,16 @@ def load_all(user_id=None) -> dict:
 
 # ── Обновление ────────────────────────────────────────────────────────────
 
-def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
+def refresh_all_data(user_id=None, creds=None, price_path=None,
+                     progress_cb=None) -> dict:
     """Скачать ВСЕ данные с API и сохранить в cache/.
 
     Args:
         user_id: если указан — per-user cache dir
         creds: dict с API-ключами (если None — fallback на config.py)
         price_path: путь к прайсу (если None — fallback на config.PRICE_FILE)
+        progress_cb: опц. callable(msg) — вызывается во время длительных пауз,
+            чтобы держать websocket Streamlit живым за reverse-proxy.
     """
     cache_dir = _user_cache_dir(user_id)
     cache_dir.mkdir(exist_ok=True)
@@ -310,9 +313,20 @@ def refresh_all_data(user_id=None, creds=None, price_path=None) -> dict:
 
             # YM /reports лимит: 1 запрос в 2 минуты на businessId.
             # Без паузы второй запрос (за месяц) гарантированно падает с 420.
+            # Бьём сон на 5-сек куски и шлём heartbeat — иначе reverse proxy
+            # (nginx default 60s, Cloudflare ~100s) рвёт websocket Streamlit.
             print("YM: жду 125 сек до второго запроса (rate limit 1/2min)...")
             import time as _t
-            _t.sleep(125)
+            _remain = 125
+            while _remain > 0:
+                if progress_cb:
+                    try:
+                        progress_cb(f"YM rate limit: ещё {_remain} сек до второго запроса…")
+                    except Exception:
+                        pass
+                _step = 5 if _remain > 5 else _remain
+                _t.sleep(_step)
+                _remain -= _step
 
             print("YM: данные за месяц...")
             ym_rev_m, ym_costs_m, ym_totals_m = load_services_report(dm, dy, creds)

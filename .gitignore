@@ -31,3 +31,6 @@ cache/
 
 # Промо-данные
 promo_data/
+
+# LLM debug dumps
+llm_debug_out/
