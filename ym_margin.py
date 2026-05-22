@@ -68,6 +68,7 @@ def _generate_report(endpoint: str, payload: dict, creds=None) -> bytes | None:
         return None
 
     report_id = resp.json()["result"]["reportId"]
+    done_no_url_streak = 0  # счётчик подряд DONE без URL — YM иногда так залипает
     for _ in range(120):
         time.sleep(3)
         r = requests.get(
@@ -81,14 +82,18 @@ def _generate_report(endpoint: str, payload: dict, creds=None) -> bytes | None:
         if st == "DONE":
             file_url = result.get("file") or result.get("downloadUrl") or result.get("url")
             if not file_url:
-                # YM иногда отдаёт DONE до того как S3 проставит URL — пробуем ещё
-                print(f"  DONE без file URL, жду 5 сек…")
+                done_no_url_streak += 1
+                if done_no_url_streak >= 10:
+                    print(f"  Отчёт {endpoint}: 10 раз подряд DONE без URL — сдаёмся")
+                    return None
+                print(f"  DONE без file URL, жду 5 сек… (попытка {done_no_url_streak}/10)")
                 time.sleep(5)
                 continue
             return requests.get(file_url, timeout=60).content
         if st == "FAILED":
             print(f"  Отчёт FAILED: {r.json()}")
             return None
+        done_no_url_streak = 0  # сбросить счётчик если статус не DONE
 
     print("  Таймаут генерации отчёта")
     return None
