@@ -486,7 +486,7 @@ def _deepseek_call(system_prompt, user_prompt):
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1200,
-            temperature=0,  # детерминированный режим — модель меньше «творит» с числами
+            temperature=0.2,  # низкая, чтобы не творить с числами, но текст не роботный
         )
     except Exception as e:
         print(f"[deepseek] упал: {type(e).__name__}: {e}")
