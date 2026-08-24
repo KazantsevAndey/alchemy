@@ -1,6 +1,7 @@
 """Settings page: API keys management."""
 
 import streamlit as st
+from datetime import datetime, timedelta
 from db import get_credentials, save_credential, delete_credentials
 from crypto import encrypt, decrypt
 
@@ -124,11 +125,14 @@ def _test_connection(mp_key: str, creds: dict):
                 st.error(f"Ozon: ошибка {resp.status_code}")
 
         elif mp_key == "wb":
+            # supplier/stocks отключён WB — проверяем токен лёгким запросом
+            # продаж за вчера (см. dev.wildberries.ru/release-notes?id=494).
+            yday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             resp = requests.get(
-                "https://statistics-api.wildberries.ru/api/v1/supplier/stocks",
+                "https://statistics-api.wildberries.ru/api/v1/supplier/sales",
                 headers={"Authorization": creds["WB_API_KEY"]},
-                params={"dateFrom": "2026-01-01"},
-                timeout=10,
+                params={"dateFrom": yday},
+                timeout=30,
             )
             if resp.status_code in (200, 204):
                 st.success("WB Statistics API: подключение успешно")
