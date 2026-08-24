@@ -185,7 +185,12 @@ def get_wb_ads(date_from: str, date_to: str, period_name: str,
 
 # Сколько раз пережидаем 429 на reportDetailByPeriod и потолок одной паузы.
 _REPORT_MAX_RETRIES = 6
-_REPORT_MAX_WAIT_SEC = 600
+_REPORT_MAX_WAIT_SEC = 900
+
+# Запас к сроку из заголовка. WB отсчитывает окно от последнего обращения,
+# включая отклонённое, поэтому повтор ровно в срок снова ловит 429 и заново
+# продлевает паузу — на этом легко зациклиться.
+_REPORT_RETRY_BUFFER_SEC = 30
 
 
 def _retry_after_seconds(resp, default: int = 65) -> int:
@@ -199,10 +204,11 @@ def _retry_after_seconds(resp, default: int = 65) -> int:
         if not raw:
             continue
         try:
-            return max(1, min(int(float(raw)), _REPORT_MAX_WAIT_SEC))
+            wait = int(float(raw)) + _REPORT_RETRY_BUFFER_SEC
         except (TypeError, ValueError):
             continue
-    return default
+        return max(1, min(wait, _REPORT_MAX_WAIT_SEC))
+    return default + _REPORT_RETRY_BUFFER_SEC
 
 
 def load_report(date_from: str, date_to: str, period: str = "daily",
