@@ -384,7 +384,8 @@ def refresh_all_data(user_id=None, creds=None, price_path=None,
             print("\n" + "=" * 60)
             print("ЦЕНЫ WB")
             print("=" * 60)
-            wb_dash = wb_build_dashboard(creds=creds, price_path=price_path)
+            wb_dash = wb_build_dashboard(
+                creds=creds, price_path=price_path, price_df=price)
             save("wb_promos_dash", wb_dash, user_id)
 
             t0 = _time.time()

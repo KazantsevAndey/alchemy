@@ -696,7 +696,7 @@ def _find_column(df: pd.DataFrame, keywords: list[str]) -> str | None:
 
 # ── Сводный дашборд: артикул + текущая цена/маржа + цены акций ────────────
 
-def build_dashboard(creds=None, price_path=None) -> pd.DataFrame:
+def build_dashboard(creds=None, price_path=None, price_df=None) -> pd.DataFrame:
     """Сводная таблица для дашборда.
 
     Колонки:
@@ -712,10 +712,19 @@ def build_dashboard(creds=None, price_path=None) -> pd.DataFrame:
     from utils.price_loader import load_price, build_cost_map
 
     # 1. Себестоимость
-    if price_path is None:
-        from config import PRICE_FILE
-        price_path = PRICE_FILE
-    price_df = load_price(price_path)
+    if price_df is None:
+        if price_path is None:
+            try:
+                from config import PRICE_FILE
+                price_path = PRICE_FILE
+            except ImportError:
+                price_path = None
+        if price_path:
+            price_df = load_price(price_path)
+        else:
+            print("  Прайс не найден — себестоимость не будет учтена")
+            price_df = pd.DataFrame(
+                columns=["Артикул", "Наименование", "Цена в рублях"])
     cost_map = build_cost_map(price_df, key_col="Артикул")
     name_map = dict(zip(
         price_df["Артикул"].astype(str).str.strip(),
