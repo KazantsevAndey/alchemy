@@ -183,6 +183,28 @@ def get_wb_ads(date_from: str, date_to: str, period_name: str,
 
 # ── Загрузка отчёта ─────────────────────────────────────────────────────
 
+# Сколько раз пережидаем 429 на reportDetailByPeriod и потолок одной паузы.
+_REPORT_MAX_RETRIES = 6
+_REPORT_MAX_WAIT_SEC = 600
+
+
+def _retry_after_seconds(resp, default: int = 65) -> int:
+    """Пауза перед повтором при 429.
+
+    WB присылает срок ожидания в X-Ratelimit-Retry (секунды); после крупного
+    отчёта он заметно больше минуты, поэтому фиксированные 65 с не помогают.
+    """
+    for header in ("X-Ratelimit-Retry", "Retry-After"):
+        raw = resp.headers.get(header)
+        if not raw:
+            continue
+        try:
+            return max(1, min(int(float(raw)), _REPORT_MAX_WAIT_SEC))
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
 def load_report(date_from: str, date_to: str, period: str = "daily",
                 creds=None) -> pd.DataFrame:
     url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
@@ -202,16 +224,18 @@ def load_report(date_from: str, date_to: str, period: str = "daily",
         resp = requests.get(url, headers=headers, params=params)
 
         retries = 0
-        while resp.status_code == 429 and retries < 3:
+        while resp.status_code == 429 and retries < _REPORT_MAX_RETRIES:
             retries += 1
-            print(f"  Rate limit, жду 65 сек... (попытка {retries}/3)")
-            time.sleep(65)
+            wait = _retry_after_seconds(resp)
+            print(f"  Rate limit, жду {wait} сек... "
+                  f"(попытка {retries}/{_REPORT_MAX_RETRIES})")
+            time.sleep(wait)
             resp = requests.get(url, headers=headers, params=params)
 
         if resp.status_code == 429:
             raise RuntimeError(
-                f"WB reportDetailByPeriod: rate limit не отпустил после 3 попыток "
-                f"({date_from} → {date_to})"
+                f"WB reportDetailByPeriod: rate limit не отпустил после "
+                f"{_REPORT_MAX_RETRIES} попыток ({date_from} → {date_to})"
             )
 
         if resp.status_code == 204 or not resp.content:
