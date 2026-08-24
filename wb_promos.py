@@ -156,7 +156,7 @@ def get_promotions(all_promo: bool = False, creds=None) -> pd.DataFrame:
     return df
 
 
-def get_promotion_details(promotion_ids: list[int] | int) -> pd.DataFrame:
+def get_promotion_details(promotion_ids: list[int] | int, creds=None) -> pd.DataFrame:
     """Детали акции: условия, бусты, даты.
 
     Args:
@@ -172,6 +172,7 @@ def get_promotion_details(promotion_ids: list[int] | int) -> pd.DataFrame:
     resp = _safe_get(
         f"{PROMO_BASE}/api/v1/calendar/promotions/details",
         params=params,
+        creds=creds,
     )
     if resp.status_code != 200:
         print(f"Ошибка деталей акций: {resp.status_code} — {resp.text[:300]}")
@@ -186,7 +187,8 @@ def get_promotion_details(promotion_ids: list[int] | int) -> pd.DataFrame:
     return pd.json_normalize(data if isinstance(data, list) else [data])
 
 
-def get_promo_products(promotion_id: int, in_action: bool | None = None) -> pd.DataFrame:
+def get_promo_products(promotion_id: int, in_action: bool | None = None,
+                       creds=None) -> pd.DataFrame:
     """Товары для акции (наши SKU).
 
     Делает два запроса (inAction=true + inAction=false) и склеивает,
@@ -218,6 +220,7 @@ def get_promo_products(promotion_id: int, in_action: bool | None = None) -> pd.D
             resp = _safe_get(
                 f"{PROMO_BASE}/api/v1/calendar/promotions/nomenclatures",
                 params=params,
+                creds=creds,
             )
             if resp.status_code == 422:
                 print(f"  Акция {promotion_id}: авто-акция (товары не управляются через API)")
@@ -342,6 +345,7 @@ def get_stocks(creds=None) -> pd.DataFrame:
     resp = _safe_get(
         f"{STATS_BASE}/api/v1/supplier/stocks",
         params={"dateFrom": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")},
+        creds=creds,
     )
     if resp.status_code != 200:
         print(f"Ошибка получения остатков: {resp.status_code} — {resp.text[:300]}")
@@ -356,14 +360,14 @@ def get_stocks(creds=None) -> pd.DataFrame:
     return df
 
 
-def get_stocks_summary() -> pd.DataFrame:
+def get_stocks_summary(creds=None) -> pd.DataFrame:
     """Агрегированные остатки по nmId (суммарно по всем складам).
 
     Returns:
         DataFrame: nmId, supplierArticle, subject, brand, quantity, quantityFull, Price, Discount.
         Только позиции с quantity > 0.
     """
-    stocks = get_stocks()
+    stocks = get_stocks(creds=creds)
     if stocks.empty:
         return pd.DataFrame()
 
@@ -406,7 +410,8 @@ def get_prices(nm_ids: list[int] | None = None, only_in_stock: bool = False, cre
         if nm_ids and len(nm_ids) == 1:
             params["filterNmID"] = nm_ids[0]
 
-        resp = _safe_get(f"{PRICES_BASE}/api/v2/list/goods/filter", params=params)
+        resp = _safe_get(f"{PRICES_BASE}/api/v2/list/goods/filter", params=params,
+                         creds=creds)
         if resp.status_code != 200:
             print(f"Ошибка получения цен: {resp.status_code} — {resp.text[:300]}")
             break
@@ -451,7 +456,7 @@ def get_prices(nm_ids: list[int] | None = None, only_in_stock: bool = False, cre
 
     # Только товары в наличии
     if only_in_stock:
-        stocks = get_stocks_summary()
+        stocks = get_stocks_summary(creds=creds)
         if not stocks.empty:
             in_stock_ids = set(stocks["nmId"].tolist())
             before = len(df)
@@ -576,7 +581,7 @@ def get_promo_with_prices(promotion_id: int) -> pd.DataFrame:
 
 # ── Детали автоакций ──────────────────────────────────────────────────────
 
-def get_auto_promo_details(promo_ids: list[int]) -> list[dict]:
+def get_auto_promo_details(promo_ids: list[int], creds=None) -> list[dict]:
     """Получает детали автоакций через /details endpoint.
 
     Returns:
@@ -589,6 +594,7 @@ def get_auto_promo_details(promo_ids: list[int]) -> list[dict]:
     resp = _safe_get(
         f"{PROMO_BASE}/api/v1/calendar/promotions/details",
         params=params,
+        creds=creds,
     )
     if resp.status_code != 200:
         print(f"Ошибка деталей автоакций: {resp.status_code}")
@@ -732,14 +738,14 @@ def build_dashboard(creds=None, price_path=None, price_df=None) -> pd.DataFrame:
     ))
 
     # 2. Остатки (только в наличии)
-    stocks = get_stocks_summary()
+    stocks = get_stocks_summary(creds=creds)
     if stocks.empty:
         print("Нет товаров в наличии")
         return pd.DataFrame()
 
     # 3. Текущие цены
     in_stock_ids = stocks["nmId"].tolist()
-    prices = get_prices(nm_ids=in_stock_ids)
+    prices = get_prices(nm_ids=in_stock_ids, creds=creds)
     if prices.empty:
         print("Не удалось получить цены")
         return pd.DataFrame()
@@ -769,7 +775,7 @@ def build_dashboard(creds=None, price_path=None, price_df=None) -> pd.DataFrame:
     result = df[["Артикул", "Название", "Остаток", "Себестоимость", "Цена сейчас", "Маржа сейчас %"]].copy()
 
     # 5. Получаем ВСЕ акции
-    promos = get_promotions(all_promo=True)
+    promos = get_promotions(all_promo=True, creds=creds)
     if promos.empty or "type" not in promos.columns:
         return result.sort_values("Остаток", ascending=False).reset_index(drop=True)
 
@@ -780,7 +786,7 @@ def build_dashboard(creds=None, price_path=None, price_df=None) -> pd.DataFrame:
         pid = int(promo_row["id"])
         pname = str(promo_row.get("name", f"Акция {pid}"))
 
-        products = get_promo_products(pid)
+        products = get_promo_products(pid, creds=creds)
         if products.empty:
             continue
 
@@ -806,7 +812,7 @@ def build_dashboard(creds=None, price_path=None, price_df=None) -> pd.DataFrame:
     auto = promos[promos["type"] == "auto"]
     if not auto.empty:
         auto_ids = auto["id"].astype(int).tolist()
-        details = get_auto_promo_details(auto_ids)
+        details = get_auto_promo_details(auto_ids, creds=creds)
 
         # Загружаем XLSX-данные
         print("\nЗагрузка данных автоакций из promo_data/...")
