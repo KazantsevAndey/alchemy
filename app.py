@@ -260,20 +260,31 @@ def _wb_expenses(df_key, sum_key):
             "items": expenses,
             "groups": _group_expenses(expenses, lambda n: _WB_GROUP_BY_LABEL.get(n, "semi_regulated"))}
 
-def _ym_ai_summary(d):
-    """Extract YM summary for AI signal from cached data."""
-    if d is None:
-        return {"rev": 0, "profit": 0, "margin": 0}
-    R = d["R"]
-    totals = d["totals"]
+def _ym(d):
+    """Итог ЯМ по методике «маржа от нетто» (rev = выручка нетто, как у Ozon/WB)."""
+    empty = {"gross": 0, "fees": 0, "rev": 0, "sebes": 0, "profit": 0, "margin": 0,
+             "kpi": 0, "sku": 0, "sku_no_cost": 0}
+    if d is None or not isinstance(d, dict):
+        return empty
+    R = d.get("R")
+    totals = d.get("totals") or {}
     if R is None or R.empty:
-        return {"rev": 0, "profit": 0, "margin": 0}
-    rev = R["revenue"].sum()
-    costs = sum(totals.values())
-    sebes = R["sebes_total"].sum()
-    profit = rev - costs - sebes
-    margin = (profit / rev * 100) if rev else 0
-    return {"rev": rev, "profit": profit, "margin": margin}
+        return empty
+    from ym_margin import summarize as _ym_summarize
+    if "Нетто" not in R.columns:
+        # кэш старой версии расчёта: считаем как умеем, до следующего обновления
+        gross = float(R["revenue"].sum())
+        fees = float(sum(totals.values()))
+        net = gross - fees
+        sebes = float(R["sebes_total"].fillna(0).sum())
+        profit = net - sebes
+        return {**empty, "gross": gross, "fees": fees, "rev": net, "sebes": sebes,
+                "profit": profit, "margin": profit / net * 100 if net else 0,
+                "kpi": (net - sebes * 1.04) / net * 100 if net else 0,
+                "sku": int((R["qty"] > 0).sum())}
+    return _ym_summarize(R, totals)
+
+_ym_ai_summary = _ym
 
 def _build_full_json():
     """Build full metrics JSON for AI signal (Сводка)."""
@@ -821,20 +832,23 @@ def _card(title, rev, profit, margin, btn_key=None):
             unsafe_allow_html=True,
         )
 
-def _summary_row(label, oz, wb, suffix=""):
-    """Render one row of cards: Ozon | WB | Итого."""
-    t_rev = oz["rev"] + wb["rev"]
-    t_prf = oz["profit"] + wb["profit"]
+def _summary_row(label, oz, wb, ym=None, suffix=""):
+    """Render one row of cards: Ozon | WB | ЯМ | Итого."""
+    ym = ym or {"rev": 0, "profit": 0, "margin": 0}
+    t_rev = oz["rev"] + wb["rev"] + ym["rev"]
+    t_prf = oz["profit"] + wb["profit"] + ym["profit"]
     t_mar = (t_prf / t_rev * 100) if t_rev else 0
 
     section_name = label.upper()
     st.markdown(f'<div class="section-label">{section_name}</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3, gap="medium")
+    c1, c2, c3, c4 = st.columns(4, gap="medium")
     with c1:
         _card("Ozon", oz["rev"], oz["profit"], oz["margin"], f"oz_{suffix}")
     with c2:
         _card("WB", wb["rev"], wb["profit"], wb["margin"], f"wb_{suffix}")
     with c3:
+        _card("ЯМ", ym["rev"], ym["profit"], ym["margin"], f"ym_{suffix}")
+    with c4:
         _card("Итого", t_rev, t_prf, t_mar)
 
 
@@ -947,9 +961,11 @@ if page == "⚗️ Сводка":
     wb_y = _wb(C("wb_sum_y"), C("wb_agg_y"))
     oz_m = _oz(C("oz_final_m"), C("oz_nach_m"))
     wb_m = _wb(C("wb_sum_m"), C("wb_agg_m"))
+    ym_y = _ym(C("ym_margin_y"))
+    ym_m = _ym(C("ym_margin_m"))
 
-    _summary_row("Вчера", oz_y, wb_y, "y")
-    _summary_row("Месяц", oz_m, wb_m, "m")
+    _summary_row("Вчера", oz_y, wb_y, ym_y, "y")
+    _summary_row("Месяц", oz_m, wb_m, ym_m, "m")
 
     # ── AI ──
     if st.button("ИИ анализ ситуации", key="main_ai_signal", type="primary"):
@@ -1833,26 +1849,17 @@ elif page == "🟡 Яндекс Маркет":
         st.warning("Нет данных ЯМ. Обновите кэш.")
         st.stop()
 
-    from ym_margin import SVC_ORDER as YM_SVC_ORDER, SVC_MAIN as YM_SVC_MAIN
+    from ym_margin import (SVC_ORDER as YM_SVC_ORDER, SVC_MAIN as YM_SVC_MAIN,
+                           export_frame as ym_export_frame)
 
-    def _ym_summary(d):
-        """Extract summary metrics from cached YM margin data."""
-        if d is None:
-            return {"rev": 0, "profit": 0, "margin": 0, "sku": 0}
-        R = d["R"]
-        totals = d["totals"]
-        if R is None or R.empty:
-            return {"rev": 0, "profit": 0, "margin": 0, "sku": 0}
-        rev = R["revenue"].sum()
-        costs = sum(totals.values())
-        sebes = R["sebes_total"].sum()
-        profit = rev - costs - sebes
-        margin = (profit / rev * 100) if rev else 0
-        return {"rev": rev, "profit": profit, "margin": margin,
-                "sku": len(R[R["qty"] > 0]), "costs": costs, "sebes": sebes}
+    ymy = _ym(ym_y)
+    ymm = _ym(ym_m)
 
-    ymy = _ym_summary(ym_y)
-    ymm = _ym_summary(ym_m)
+    # Кэш, собранный старой версией расчёта, не содержит колонки «Нетто»
+    _ym_R_probe = ym_m.get("R") if isinstance(ym_m, dict) else None
+    if _ym_R_probe is not None and not _ym_R_probe.empty and "Нетто" not in _ym_R_probe.columns:
+        st.warning("Данные ЯМ собраны старой версией расчёта. Нажмите «Загрузить данные» — "
+                   "после обновления появятся удержания и маржа от нетто.")
 
     # ── 3 cards ──
     def _info_card_ym(html):
@@ -1861,6 +1868,27 @@ elif page == "🟡 Яндекс Маркет":
             f'box-shadow:0 1px 3px rgba(0,0,0,0.04);background:#fff;height:100%">{html}</div>',
             unsafe_allow_html=True)
 
+    def _ym_period_card(label, s):
+        mc = "#16a34a" if s["margin"] >= 30 else "#ca8a04" if s["margin"] >= 15 else "#dc2626"
+        pc = "#16a34a" if s["profit"] >= 0 else "#dc2626"
+        fee_pct = s["fees"] / s["gross"] * 100 if s["gross"] else 0
+        _info_card_ym(
+            f'<div style="font-size:12px;font-weight:700;color:#9ca3af;letter-spacing:1px;margin-bottom:8px">{label}</div>'
+            f'<div style="display:flex;align-items:center;gap:16px">'
+            f'<div style="flex:1">'
+            f'<div style="font-size:11px;color:#9ca3af">Выручка нетто</div>'
+            f'<div style="font-size:15px;font-weight:600;color:#1e293b;font-feature-settings:\'tnum\'">{_fm(s["rev"])} ₽</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:2px">гросс {_fm(s["gross"])} ₽ · удержано {fee_pct:.1f}%</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:4px">Прибыль</div>'
+            f'<div style="font-size:15px;font-weight:600;color:{pc};font-feature-settings:\'tnum\'">{_fm(s["profit"])} ₽</div>'
+            f'</div>'
+            f'<div style="text-align:right">'
+            f'<div style="font-size:11px;color:#9ca3af">Маржа от нетто</div>'
+            f'<div style="font-size:40px;font-weight:800;color:{mc};line-height:1.1;font-feature-settings:\'tnum\'">{s["margin"]:.1f}%</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:2px">KPI (себес ×1,04): <b>{s["kpi"]:.1f}%</b></div>'
+            f'</div></div>'
+        )
+
     c1, c2, c3 = st.columns(3, gap="medium")
     with c1:
         _info_card_ym(
@@ -1868,41 +1896,17 @@ elif page == "🟡 Яндекс Маркет":
             f'<div style="font-size:12px;color:#9ca3af">SKU с продажами (месяц)</div>'
             f'<div style="font-size:20px;font-weight:700;color:#1e293b">{ymm["sku"]}</div>'
             f'<div style="font-size:11px;color:#9ca3af;margin-top:6px">{MSTR}</div>'
+            f'<div style="font-size:11px;color:#9ca3af;margin-top:6px">Маржа = (нетто − себестоимость) / нетто,<br>'
+            f'нетто = цена продавца − все удержания Маркета</div>'
         )
     with c2:
-        ym_yc = "#16a34a" if ymy["margin"] >= 30 else "#ca8a04" if ymy["margin"] >= 15 else "#dc2626"
-        yp_c = "#16a34a" if ymy["profit"] >= 0 else "#dc2626"
-        _info_card_ym(
-            f'<div style="font-size:12px;font-weight:700;color:#9ca3af;letter-spacing:1px;margin-bottom:8px">ВЧЕРА</div>'
-            f'<div style="display:flex;align-items:center;gap:16px">'
-            f'<div style="flex:1">'
-            f'<div style="font-size:11px;color:#9ca3af">Выручка</div>'
-            f'<div style="font-size:15px;font-weight:600;color:#1e293b;font-feature-settings:\'tnum\'">{_fm(ymy["rev"])} ₽</div>'
-            f'<div style="font-size:11px;color:#9ca3af;margin-top:4px">Прибыль</div>'
-            f'<div style="font-size:15px;font-weight:600;color:{yp_c};font-feature-settings:\'tnum\'">{_fm(ymy["profit"])} ₽</div>'
-            f'</div>'
-            f'<div style="text-align:right">'
-            f'<div style="font-size:11px;color:#9ca3af">Маржа</div>'
-            f'<div style="font-size:40px;font-weight:800;color:{ym_yc};line-height:1.1;font-feature-settings:\'tnum\'">{ymy["margin"]:.1f}%</div>'
-            f'</div></div>'
-        )
+        _ym_period_card("ВЧЕРА", ymy)
     with c3:
-        ym_mc = "#16a34a" if ymm["margin"] >= 30 else "#ca8a04" if ymm["margin"] >= 15 else "#dc2626"
-        mp_c = "#16a34a" if ymm["profit"] >= 0 else "#dc2626"
-        _info_card_ym(
-            f'<div style="font-size:12px;font-weight:700;color:#9ca3af;letter-spacing:1px;margin-bottom:8px">МЕСЯЦ</div>'
-            f'<div style="display:flex;align-items:center;gap:16px">'
-            f'<div style="flex:1">'
-            f'<div style="font-size:11px;color:#9ca3af">Выручка</div>'
-            f'<div style="font-size:15px;font-weight:600;color:#1e293b;font-feature-settings:\'tnum\'">{_fm(ymm["rev"])} ₽</div>'
-            f'<div style="font-size:11px;color:#9ca3af;margin-top:4px">Прибыль</div>'
-            f'<div style="font-size:15px;font-weight:600;color:{mp_c};font-feature-settings:\'tnum\'">{_fm(ymm["profit"])} ₽</div>'
-            f'</div>'
-            f'<div style="text-align:right">'
-            f'<div style="font-size:11px;color:#9ca3af">Маржа</div>'
-            f'<div style="font-size:40px;font-weight:800;color:{ym_mc};line-height:1.1;font-feature-settings:\'tnum\'">{ymm["margin"]:.1f}%</div>'
-            f'</div></div>'
-        )
+        _ym_period_card("МЕСЯЦ", ymm)
+
+    if ymm.get("sku_no_cost"):
+        st.warning(f"У {ymm['sku_no_cost']} SKU с продажами нет себестоимости в прайсе — "
+                   f"их прибыль не посчитана, итог по кабинету завышен.")
 
     st.divider()
 
@@ -1915,9 +1919,11 @@ elif page == "🟡 Яндекс Маркет":
 
     ym_R = ym_data["R"]
     ym_totals = ym_data["totals"]
+    ym_info = ym_data.get("info") or {}
+    ym_s = ymy if ym_period == "Вчера" else ymm
 
-    # ── Структура расходов (pie chart) ──
-    st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>СТРУКТУРА РАСХОДОВ (ГРОСС)</div>', unsafe_allow_html=True)
+    # ── Структура удержаний ──
+    st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>СТРУКТУРА УДЕРЖАНИЙ МАРКЕТА</div>', unsafe_allow_html=True)
 
     svc_items = [(k, v) for k, v in ym_totals.items() if v > 0]
     if svc_items:
@@ -1927,7 +1933,8 @@ elif page == "🟡 Яндекс Маркет":
             fig_pie = px.pie(
                 svc_df, values="Сумма", names="Услуга",
                 color_discrete_sequence=["#ca8a04", "#f59e0b", "#fbbf24", "#fcd34d",
-                                         "#fde68a", "#fef3c7", "#d97706", "#b45309"],
+                                         "#fde68a", "#fef3c7", "#d97706", "#b45309",
+                                         "#92400e", "#78350f"],
                 hole=0.45,
             )
             fig_pie.update_traces(textposition="inside", textinfo="percent+label",
@@ -1940,19 +1947,30 @@ elif page == "🟡 Яндекс Маркет":
             st.plotly_chart(fig_pie, use_container_width=True, key="ym_pie",
                             config={"displayModeBar": False})
         with col_tbl:
-            gross_svc = sum(ym_totals.values())
+            gross_rev = ym_s["gross"] or 1
             lines = []
-            for svc in YM_SVC_ORDER:
+            order = YM_SVC_ORDER + [k for k in ym_totals if k not in YM_SVC_ORDER]
+            for svc in order:
                 val = ym_totals.get(svc, 0)
-                if val > 0:
-                    pct = val / gross_svc * 100 if gross_svc else 0
-                    lines.append(f"  {svc}: **{_fm(val)}** ₽ ({pct:.0f}%)")
-            lines.append(f"  **ИТОГО: {_fm(gross_svc)} ₽**")
+                if val:
+                    lines.append(f"  {svc}: **{_fm(val)}** ₽ ({val / gross_rev * 100:.1f}% выручки)")
+            lines.append(f"  **ИТОГО удержано: {_fm(ym_s['fees'])} ₽ ({ym_s['fees'] / gross_rev * 100:.1f}%)**")
             st.markdown("\n".join(lines))
+
+            promo = float(ym_totals.get("Совместные акции") or 0)
+            if promo > 0:
+                st.info(
+                    f"**Совместные акции: {_fm(promo)} ₽ ({promo / gross_rev * 100:.1f}% выручки).** "
+                    f"В отчёте по услугам Маркет показывает это как скидку на размещение и буст, "
+                    f"но списывает обратно через баланс продавца. Это аналог соинвеста Ozon: "
+                    f"уменьшить можно только выходом из акций."
+                )
 
     # ── SKU таблица ──
     st.divider()
     st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>ЮНИТ-ЭКОНОМИКА ПО SKU</div>', unsafe_allow_html=True)
+    st.caption("Маржа по SKU считается без хранения: оно начисляется за товар на складе, "
+               "а не за проданную штуку. Хранение учтено в итоге по кабинету и показано отдельной колонкой.")
 
     if ym_R is not None and not ym_R.empty:
         # Filters
@@ -1964,63 +1982,56 @@ elif page == "🟡 Яндекс Маркет":
         with fc2:
             ym_mr_from = st.number_input("Маржа от %", value=-100, step=1, key="ym_mr_from")
         with fc3:
-            ym_mr_to = st.number_input("Маржа до %", value=80, step=1, key="ym_mr_to")
+            ym_mr_to = st.number_input("Маржа до %", value=100, step=1, key="ym_mr_to")
 
-        # Build display table
-        tbl = ym_R.copy()
-        # Колонки уже правильные из calc_margin:
-        # sku, name, qty, revenue, Размещение..Перевод, Прочее, Затраты,
-        # sebes_unit, sebes_total, Прибыль, Маржа_pct
+        sold = ym_R[ym_R["qty"] > 0].copy()
+        tbl = ym_export_frame(sold)
+        if "Скидка Маркета" in tbl.columns and (tbl["Скидка Маркета"].fillna(0) == 0).all():
+            tbl = tbl.drop(columns=["Скидка Маркета"])
 
-        display_cols = ["sku", "name", "qty", "revenue"]
-        display_cols += [s for s in YM_SVC_MAIN if s in tbl.columns]
-        display_cols += ["Прочее", "Затраты", "sebes_unit", "sebes_total", "Прибыль", "Маржа_pct"]
-
-        rename = {
-            "sku": "Артикул", "name": "Название", "qty": "Шт",
-            "revenue": "Выручка", "Затраты": "Затраты итого",
-            "sebes_unit": "Себест/шт", "sebes_total": "Себестоимость",
-            "Маржа_pct": "Маржа %",
-        }
-
-        tbl = tbl[[c for c in display_cols if c in tbl.columns]].copy()
-        tbl = tbl.rename(columns=rename)
-
-        # Apply filters
         if ym_q:
             tbl = tbl[tbl["Артикул"].astype(str).str.contains(ym_q, case=False, na=False) |
                        tbl["Название"].astype(str).str.contains(ym_q, case=False, na=False)]
-        tbl = tbl[(tbl["Маржа %"] >= ym_mr_from) & (tbl["Маржа %"] <= ym_mr_to)]
+        _mr = tbl["Маржа %"]
+        tbl = tbl[_mr.isna() | ((_mr >= ym_mr_from) & (_mr <= ym_mr_to))]
 
-        fmt = {"Выручка": "{:,.0f}", "Себестоимость": "{:,.0f}", "Затраты итого": "{:,.0f}",
-               "Прибыль": "{:,.0f}", "Маржа %": "{:.1f}%",
-               "Себест/шт": "{:,.0f}", "Прочее": "{:,.0f}"}
-        for s in YM_SVC_MAIN:
-            fmt[s] = "{:,.0f}"
+        money_cols = [c for c in tbl.columns if c not in ("Артикул", "Название", "Шт", "Маржа %")]
+        fmt = {c: "{:,.0f}" for c in money_cols}
+        fmt["Маржа %"] = "{:.1f}%"
 
         styled = (tbl.style.format(fmt, na_rep="—")
                   .map(_margin_bar, subset=["Маржа %"]))
         st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
-        st.caption(f"{len(tbl)} SKU")
+        st.caption(f"{len(tbl)} SKU с продажами")
+
+        # ── Хранение без продаж ──
+        idle = ym_R[(ym_R["qty"] == 0) & (ym_R.get("Хранение", 0) > 0)] if "Хранение" in ym_R.columns else pd.DataFrame()
+        if not idle.empty:
+            with st.expander(f"Хранение без продаж: {len(idle)} SKU, {_fm(idle['Хранение'].sum())} ₽"):
+                idle_tbl = idle[["sku", "Хранение"]].rename(
+                    columns={"sku": "Артикул", "Хранение": "Хранение, ₽"}
+                ).sort_values("Хранение, ₽", ascending=False)
+                st.dataframe(idle_tbl.style.format({"Хранение, ₽": "{:,.0f}"}),
+                             use_container_width=True, hide_index=True)
 
         # ── Топ-15 по выручке ──
         st.divider()
         st.markdown('<div class="section-label"><span class="section-dot" style="background:#ca8a04"></span>ТОП-15 SKU ПО ВЫРУЧКЕ</div>', unsafe_allow_html=True)
 
-        top15 = ym_R[ym_R["qty"] > 0].sort_values("revenue", ascending=False).head(15)
+        top15 = sold.sort_values("revenue", ascending=False).head(15)
         top15 = top15.sort_values("revenue", ascending=True)
         top15["short"] = top15["name"].str[:40]
+        _prof = top15["Прибыль"].fillna(0)
+        _marg = top15["Маржа_pct"].fillna(0)
 
         fig_top = go.Figure(go.Bar(
             y=top15["short"], x=top15["revenue"],
             orientation="h",
             marker_color="#ca8a04",
-            customdata=list(zip(
-                top15["name"], top15["revenue"], top15["Прибыль"], top15["Маржа_pct"],
-            )),
+            customdata=list(zip(top15["name"], top15["revenue"], _prof, _marg)),
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
-                "Выручка: %{customdata[1]:,.0f} ₽<br>"
+                "Выручка гросс: %{customdata[1]:,.0f} ₽<br>"
                 "Прибыль: %{customdata[2]:,.0f} ₽<br>"
                 "Маржа: %{customdata[3]:.1f}%"
                 "<extra></extra>"
@@ -2031,7 +2042,7 @@ elif page == "🟡 Яндекс Маркет":
             margin=dict(l=10, r=10, t=10, b=10),
             bargap=0.3,
             showlegend=False,
-            xaxis_title="Выручка, ₽",
+            xaxis_title="Выручка гросс, ₽",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
@@ -2044,18 +2055,18 @@ elif page == "🟡 Яндекс Маркет":
         st.divider()
         import io as _io_ym_margin
         ym_buf = _io_ym_margin.BytesIO()
-        export_cols = ["sku", "name", "qty", "revenue"]
-        export_cols += [s for s in YM_SVC_MAIN if s in ym_R.columns]
-        export_cols += ["Прочее", "Затраты", "sebes_unit", "sebes_total", "Прибыль", "Маржа_pct"]
-        export_df = ym_R[[c for c in export_cols if c in ym_R.columns]].copy()
-        exp_rename = {
-            "sku": "Артикул", "name": "Название", "qty": "Шт",
-            "revenue": "Выручка", "Затраты": "Затраты итого",
-            "sebes_unit": "Себест/шт", "sebes_total": "Себестоимость",
-            "Маржа_pct": "Маржа %",
-        }
-        export_df = export_df.rename(columns=exp_rename)
-        export_df.to_excel(ym_buf, index=False, sheet_name="ЯМ Маржа")
+        with pd.ExcelWriter(ym_buf) as _xw:
+            ym_export_frame(ym_R).to_excel(_xw, index=False, sheet_name="ЯМ Маржа")
+            pd.DataFrame(
+                [{"Услуга": k, "Сумма, ₽": v} for k, v in ym_totals.items()]
+                + [{"Услуга": "ИТОГО удержано", "Сумма, ₽": ym_s["fees"]},
+                   {"Услуга": "Выручка гросс", "Сумма, ₽": ym_s["gross"]},
+                   {"Услуга": "Выручка нетто", "Сумма, ₽": ym_s["rev"]},
+                   {"Услуга": "Себестоимость", "Сумма, ₽": ym_s["sebes"]},
+                   {"Услуга": "Прибыль", "Сумма, ₽": ym_s["profit"]},
+                   {"Услуга": "Маржа от нетто, %", "Сумма, ₽": round(ym_s["margin"], 1)},
+                   {"Услуга": "KPI (себес ×1,04), %", "Сумма, ₽": round(ym_s["kpi"], 1)}]
+            ).to_excel(_xw, index=False, sheet_name="Итого")
         st.download_button(
             "Скачать Excel", data=ym_buf.getvalue(),
             file_name=f"ym_margin_{ym_period.lower()}_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
@@ -2064,7 +2075,6 @@ elif page == "🟡 Яндекс Маркет":
         )
     else:
         st.info("Нет данных по SKU")
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # 📦 Остатки

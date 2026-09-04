@@ -306,10 +306,10 @@ def refresh_all_data(user_id=None, creds=None, price_path=None,
             ym_cost_map = build_cost_map(price)
 
             print("YM: данные за вчера...")
-            ym_rev_y, ym_costs_y, ym_totals_y = load_services_report(dy, dy, creds)
+            ym_rev_y, ym_costs_y, ym_totals_y, ym_info_y = load_services_report(dy, dy, creds)
             ym_R_y = ym_calc_margin(ym_rev_y, ym_costs_y, ym_totals_y,
-                                     ym_cost_map, f"YM Вчера ({dy})")
-            save("ym_margin_y", {"R": ym_R_y, "totals": ym_totals_y}, user_id)
+                                     ym_cost_map, f"YM Вчера ({dy})", ym_info_y)
+            save("ym_margin_y", {"R": ym_R_y, "totals": ym_totals_y, "info": ym_info_y}, user_id)
 
             # YM /reports лимит: 1 запрос в 2 минуты на businessId.
             # Без паузы второй запрос (за месяц) гарантированно падает с 420.
@@ -329,10 +329,10 @@ def refresh_all_data(user_id=None, creds=None, price_path=None,
                 _remain -= _step
 
             print("YM: данные за месяц...")
-            ym_rev_m, ym_costs_m, ym_totals_m = load_services_report(dm, dy, creds)
+            ym_rev_m, ym_costs_m, ym_totals_m, ym_info_m = load_services_report(dm, dy, creds)
             ym_R_m = ym_calc_margin(ym_rev_m, ym_costs_m, ym_totals_m,
-                                     ym_cost_map, f"YM Месяц ({dm} — {dy})")
-            save("ym_margin_m", {"R": ym_R_m, "totals": ym_totals_m}, user_id)
+                                     ym_cost_map, f"YM Месяц ({dm} — {dy})", ym_info_m)
+            save("ym_margin_m", {"R": ym_R_m, "totals": ym_totals_m, "info": ym_info_m}, user_id)
         except Exception as e:
             print(f"  YM ОШИБКА: {e}")
     else:
