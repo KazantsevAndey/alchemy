@@ -62,12 +62,21 @@ def fetch_all(creds: dict, year: int, month: int, out_dir: str) -> dict:
     campaigns = requests.get(f"{YM_BASE}/campaigns", headers=_ym_headers(creds), timeout=30).json()
     camp_ids = [c["id"] for c in campaigns.get("campaigns", [])]
 
-    jobs = [("svc_act", "united-marketplace-services",
-             {"businessId": bid, "yearFrom": year, "monthFrom": month, "yearTo": year, "monthTo": month}),
+    today = dt.date.today()
+    open_month = (year, month) >= (today.year, today.month)
+    if open_month:
+        # Месяц не закрыт: акта ещё нет, берём отчёт по датам начисления с 1-го по сегодня.
+        # Проверено на августе: по акту и по датам суммы совпадают.
+        svc_payload = {"businessId": bid, "dateFrom": first.isoformat(), "dateTo": today.isoformat()}
+        print(f"  месяц не закрыт — услуги по датам начисления {first} — {today}", flush=True)
+    else:
+        svc_payload = {"businessId": bid, "yearFrom": year, "monthFrom": month, "yearTo": year, "monthTo": month}
+    jobs = [("svc_act", "united-marketplace-services", svc_payload),
             ("netting", "united-netting", {"businessId": bid, "dateFrom": net_from, "dateTo": net_to}),
             ("points", "united-netting", {"businessId": bid, "monthOfYear": {"year": year, "month": month}})]
     for cid in camp_ids:
-        jobs.append((f"real_{cid}", "goods-realization", {"campaignId": cid, "year": year, "month": month}))
+        if not open_month:  # отчёт по реализации существует только для закрытого месяца
+            jobs.append((f"real_{cid}", "goods-realization", {"campaignId": cid, "year": year, "month": month}))
 
     files, last_call = {}, {}
     for key, ep, payload in jobs:
@@ -206,9 +215,12 @@ def close_month(files: dict, year: int, month: int, cost_map: dict, out_xlsx: st
             for kk in real:
                 real[kk] += t[kk]
     d_real = real["gross"] - gross
-    print(f"\n2. Отчёт по реализации (закрывающий): доставлено {real['qty']:.0f} шт, "
-          f"без скидок {real['gross']:,.2f}, покупатели заплатили {real['paid']:,.2f}")
-    print(f"   {ok(d_real)} без скидок − гросс из п.1 = {d_real:,.2f}")
+    if any(k.startswith("real_") for k in files):
+        print(f"\n2. Отчёт по реализации (закрывающий): доставлено {real['qty']:.0f} шт, "
+              f"без скидок {real['gross']:,.2f}, покупатели заплатили {real['paid']:,.2f}")
+        print(f"   {ok(d_real)} без скидок − гросс из п.1 = {d_real:,.2f}")
+    else:
+        print("\n2. Отчёт по реализации: месяц не закрыт, отчёта ещё нет")
 
     # 3. Платежи
     lines = services_by_line(files["svc_act"])
